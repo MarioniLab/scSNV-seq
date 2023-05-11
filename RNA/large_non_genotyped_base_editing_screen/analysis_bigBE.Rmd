@@ -42,7 +42,7 @@ knitr::opts_chunk$set(
     dpi=300
 )
 
-sce_file <- "sce_bigBE_gRNA_iBAR.rds"
+sce_file <- "sce_bigBE_gRNA.rds"
 sce_save_file <- "sce_bigBE_gRNA_analysed.rds"
 folder_cellranger <-"/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/bigBE_1/outs"
 markers_file <- paste0("markers_bigBE.csv")

@@ -27,10 +27,9 @@ library(batchelor)
 set.seed(12345)
 
 folders_cellranger_gRNA <-  paste0("/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/bigBE_",sapply(1:4,toString),"/outs")
-folders_cellranger_iBAR <-  paste0("/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/bigBE_iBAR",sapply(1:4,toString),"/outs")
 file_name_gRNA_assignment <- "gRNA_assignment_bigBE.rds"
 file_name_sce_list_after_QC <- "sce_list_bigBE.rds"
-file_name_sce_list_after_gRNA_iBAR_assignment <- "sce_bigBE_gRNA_iBAR.rds"
+file_name_sce_list_after_gRNA_assignment <- "sce_bigBE_gRNA.rds"
 ids <- c("sample1","sample2","sample3","sample4")
 
 ```
@@ -99,6 +98,6 @@ Saving the SingleCellExperiments.
 ```{r}
 sce_list <- multiBatchNorm(sce_list)
 merged_sce <- do.call(cbind,sce_list)
-saveRDS(merged_sce,file_name_sce_list_after_gRNA_iBAR_assignment)
+saveRDS(merged_sce,file_name_sce_list_after_gRNA_assignment)
 ```
 

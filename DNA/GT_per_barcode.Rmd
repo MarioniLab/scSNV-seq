@@ -1,0 +1,415 @@
+---
+title: "Genotype assignment per barcode"
+output:
+  html_document:
+    number_sections: yes
+    keep_md: yes
+---
+
+This script processes per-cell genotype calls using iBAR and puro-barcode information. The output is summarised genotype information per barcode. Further, consequence and impact of genotypes are predicted using VEP (W. McLaren et al. The ensembl variant effect predictor. Genome Biol., 17 (2016)) and actual genotype information. 
+
+```{r,setup}
+knitr::opts_chunk$set(
+    echo = FALSE,
+    message = FALSE,
+    warning = FALSE,
+    message = FALSE,
+    dev = c("pdf"),
+    dpi=300
+)
+source("core_functions_MissionBio.R")
+library(dplyr)
+```
+
+Reading in the per-cell genotype information. 
+
+```{r}
+df_GT <- readRDS("genotypes_MB_per_cell.rds")
+puroBC.keep <- names(table(df_GT$puroBC_gRNA_iBAR))[table(df_GT$puroBC_gRNA_iBAR)>= 3]
+df_GT_min_cells <- df_GT[df_GT$puroBC_gRNA_iBAR%in%puroBC.keep,]
+df_GT_min_cells <- df_GT_min_cells[!(grepl("NA",df_GT_min_cells$puroBC_gRNA_iBAR)),]
+dim(df_GT_min_cells)
+```
+
+Checking if any puro-barcodes are associated with more than one gRNA-iBAR combination. 
+
+```{r}
+count_puroBC_iBAR <- df_GT_min_cells[,3:4] %>% dplyr::group_by_all() %>% dplyr::count()
+puroBC_dup <- names(table(count_puroBC_iBAR$puroBC))[table(count_puroBC_iBAR$puroBC) > 1]
+df_GT_min_cells <- df_GT_min_cells[!(df_GT_min_cells$puroBC%in%puroBC_dup),]
+```
+
+Now we assign mutations to puro-barcodes.
+
+```{r}
+GT_puro_BC <-  assign_mutations_to_puro_barcodes(df_GT_min_cell_number=df_GT_min_cells, column_name_barcode="puroBC")
+GT_puro_BC <- GT_puro_BC[unlist(lapply(GT_puro_BC,function(x) x!=""))]
+df_GT_sub <- df_GT[df_GT$puroBC%in%names(GT_puro_BC),]
+barcode_gRNA <- data.frame(cell=df_GT_sub$cell,puroBC=df_GT_sub$puroBC,gRNA_iBAR=paste0(df_GT_sub$gRNA,
+                                                                                          "-",df_GT_sub$iBAR))
+barcode_gRNA_count <- barcode_gRNA[,2:3] %>% dplyr::group_by_all() %>% dplyr::count()
+barcode_gRNA_count <- barcode_gRNA_count[!(grepl("NA",barcode_gRNA_count$gRNA_iBAR)),]
+barcode_gRNA_count <- barcode_gRNA_count[barcode_gRNA_count$n>1,]
+barcode_gRNA_count$GT <- GT_puro_BC[barcode_gRNA_count$puroBC]
+df_GT_puro_iBAR <- barcode_gRNA_count[,c(1,2,4)] 
+df_GT_puro_iBAR$any_homozygous <- grepl("1/1/1",df_GT_puro_iBAR$GT)
+
+
+df_GT_puro_iBAR$gRNA <- sapply(df_GT_puro_iBAR$gRNA_iBAR,function(x) strsplit(x,"-")[[1]][1])
+gRNA_info <- data.table::fread("gRNA_info_coordinates.csv")
+u_gRNA <- unique(df_GT_puro_iBAR$gRNA)
+u_gRNA <- u_gRNA[!(is.na(u_gRNA))]
+df_GT_puro_iBAR$gene <- rep("",nrow(df_GT_puro_iBAR))
+for (j in 1:length(u_gRNA)){
+  df_GT_puro_iBAR$gene[which(df_GT_puro_iBAR$gRNA == u_gRNA[j])] <- gRNA_info$Gene[which(gRNA_info$sgRNA_ID == u_gRNA[j])]
+}
+
+df_GT_puro_iBAR$start <- NA 
+df_GT_puro_iBAR$strand <- NA 
+df_GT_puro_iBAR$end <- NA 
+df_GT_puro_iBAR$exonic <- NA
+for (j in 1:length(u_gRNA)){
+  df_GT_puro_iBAR$strand[df_GT_puro_iBAR$gRNA %in% u_gRNA[j]] <- unique(gRNA_info$strand[gRNA_info$sgRNA_ID == u_gRNA[j]]) 
+} 
+ for (j in 1:length(u_gRNA)){
+  df_GT_puro_iBAR$start[df_GT_puro_iBAR$gRNA %in% u_gRNA[j]] <- unique(gRNA_info$start[gRNA_info$sgRNA_ID == u_gRNA[j]]) }
+for (j in 1:length(u_gRNA)){
+  df_GT_puro_iBAR$end[df_GT_puro_iBAR$gRNA %in% u_gRNA[j]] <- unique(gRNA_info$end[gRNA_info$sgRNA_ID == u_gRNA[j]]) }
+for (j in 1:length(u_gRNA)){
+  df_GT_puro_iBAR$exonic[df_GT_puro_iBAR$gRNA %in% u_gRNA[j]] <- unique(gRNA_info$exonic[gRNA_info$sgRNA_ID == u_gRNA[j]]) }
+```
+
+Removing barcodes with additional non C->T edits at the same location as a C -> T edit.
+
+```{r}
+df_GT_puro_iBAR <- df_GT_puro_iBAR[!(grepl("/2",df_GT_puro_iBAR$GT)),]
+```
+
+The number of puro-barcodes after this filtering is the following:
+
+```{r}
+length(unique(df_GT_puro_iBAR$puroBC))
+```
+
+The mutations are converted to an input format for VEP (W. McLaren et al. The ensembl variant effect predictor. Genome Biol., 17 (2016)). 
+
+```{r}
+mutations_all <- unlist(sapply(df_GT_puro_iBAR$GT,function(x) strsplit(x,";")))
+names(mutations_all) <- NULL
+mutations_all <- unique(mutations_all)
+positions_all <- sapply(mutations_all,function(x) strsplit(x,"-")[[1]][c(1,3,4)])
+dim(positions_all) <- c(3,length(positions_all)/3)
+ref <- positions_all[2,]
+alt <- ref
+alt[ref=="C"] <- "T"
+alt[ref=="G"] <- "A"
+df_VEP <- data.frame(chrom=rep(1,ncol(positions_all)),start=positions_all[1,],end=positions_all[1,],allele=paste0(ref,"/",alt),
+                     strand="+")
+df_VEP <- distinct(df_VEP)
+write.table(df_VEP,"VEP_input.txt",quote=FALSE,col.names=FALSE,row.names=FALSE)
+```
+
+VEP output is loaded and added to the data frame for the homozygous mutations. 
+
+```{r}
+VEP<- data.table::fread("VEP_MB2.txt" ,header=TRUE)
+VEP$mutation <- sapply(VEP$`#Uploaded_variation`,function(x) paste0(strsplit(x,"_")[[1]][2],"-",strsplit(x,"_")[[1]][3]))
+VEP <- VEP[VEP$MANE_SELECT!="-",]
+VEP$gene <- VEP$SYMBOL
+VEP <- VEP[VEP$gene=="JAK1",]
+VEP <- VEP[,c("mutation","Consequence","IMPACT","Existing_variation","gene","SIFT","PolyPhen","MaxEntScan_diff")]
+VEP$Existing_variation <- sapply(VEP$Existing_variation,function(x) gsub(",","-",x))
+rownames(VEP) <- NULL
+VEP <- dplyr::distinct(VEP)
+```
+
+We classify mutations as in Coelho et al. Base editing screens map mutations affecting IFNg signalling in cancer. Cancer Cell (2023), see https://github.com/MatthewACoelho/Base_Editing_Screens/blob/main/ABE8e_080522.Rmd
+
+```{r}
+# https://github.com/MatthewACoelho/Base_Editing_Screens/blob/main/ABE8e_080522.Rmd
+Consequence <- VEP$Consequence
+Consequence <- sapply(Consequence,function(x) gsub(",","_",x))
+Consequence = ifelse(Consequence == "missense_variant", "missense", ifelse(Consequence == "missense_variant_splice_region_variant", "splice variant", 
+                    ifelse(Consequence == "splice_region_variant", "splice variant", 
+                    ifelse(Consequence == "stop_retained_variant", "synonymous",
+                    ifelse(Consequence == "synonymous_variant", "synonymous", 
+                    ifelse(Consequence == "splice_region_variant_synonymous_variant", "splice variant",
+                     ifelse(Consequence == "splice_region_variant,synonymous_variant" ,"splice variant",
+                    ifelse(Consequence == "splice_acceptor_variant", "splice variant",
+                    ifelse(Consequence == "splice_donor_variant", "splice variant",
+                    ifelse(Consequence == "splice_region_variant_intron_variant", "splice variant",
+                    ifelse(Consequence == "splice_polypyrimidine_tract_variant", "splice variant",
+                    ifelse(Consequence == "splice_polypyrimidine_tract_variant,intron_variant", "splice variant",
+                    ifelse(Consequence == "splice_donor_region_variant_intron_variant", "splice variant",
+                    ifelse(Consequence == "splice_polypyrimidine_tract_variant_intron_variant", "splice variant",
+                    ifelse(Consequence == "splice_polypyrimidine_tract_variant_splice_region_variant_intron_variant", "splice variant",
+                    ifelse(Consequence == "splice_donor_5th_base_variant_intron_variant", "splice variant",
+                    ifelse(Consequence == "downstream_gene_variant", "UTR",
+                    ifelse(Consequence == "stop_gained_splice_region_variant", "stop codon",
+                    ifelse(Consequence == "start_lost", "start lost",
+                    ifelse(Consequence == "stop_gained_start_lost", "stop codon",
+                    ifelse(Consequence == "upstream_gene_variant", "promoter",
+                    ifelse(Consequence == "intron_variant", "intron",
+                    ifelse(Consequence == "5_prime_UTR_variant", "5'UTR",
+                    ifelse(Consequence == "3_prime_UTR_variant", "3'UTR",
+                    ifelse(Consequence == "stop_gained", "stop codon", Consequence)))))))))))))))))))))))))
+VEP$Consequence <- Consequence
+#Label a mutation 'promoter' if it is in the promotor region of JAK1 as identified in Coelho et. al (2023)
+VEP_positions <- as.double(sapply(VEP$mutation,function(x) strsplit(x,"-")[[1]][1]))
+VEP$Consequence[VEP_positions >= 64964978 &  VEP_positions <= 64967543] <- "promoter"
+```
+
+```{r}
+df_GT_puro_iBAR_edited <- df_GT_puro_iBAR[!(df_GT_puro_iBAR$GT%in%c("WT","")),]
+mutation_list <- sapply(df_GT_puro_iBAR_edited$GT,function(x) strsplit(x,";"))
+df_GT_puro_iBAR$impact <- NA
+df_GT_puro_iBAR$consequence <- NA
+df_GT_puro_iBAR$existing_variation <- NA
+df_GT_puro_iBAR$homozygous_edits <- NA
+df_GT_puro_iBAR$SIFT <- NA
+df_GT_puro_iBAR$PolyPhen <- NA
+df_GT_puro_iBAR$MaxEntScan_diff <- NA
+for (j in 1:length(mutation_list)){
+  temp <- sapply(mutation_list[[j]],function(x) strsplit(x,"-")[[1]][c(1,3,4)])
+  type_temp <- sapply(mutation_list[[j]],function(x) strsplit(x,"-")[[1]][2])
+  type <- rep("het",length(type_temp))
+  type[type_temp=="1/1/1"] <- "hom"
+  ref <- temp[2,]
+  alt <- ref
+  alt[ref=="C"] <- "T"
+  alt[ref=="G"] <- "A"
+  df_VEP_temp <- paste0(temp[1,],"-",ref,"/",alt)
+  existing_variation_temp <-  VEP$Existing_variation[match(df_VEP_temp,VEP$mutation)]
+  if (length(existing_variation_temp) >1){
+      existing_variation_temp <- sort(existing_variation_temp)
+      v <- existing_variation_temp[1]
+      for (k in 2:length(existing_variation_temp)){
+        v <- paste0(v,";",existing_variation_temp[k])
+      }
+       existing_variation_temp <- v
+  }
+  df_GT_puro_iBAR$existing_variation[df_GT_puro_iBAR$puroBC==names(mutation_list)[j]] <- existing_variation_temp
+
+  xx <- type=="hom"
+  if (sum(xx) > 0){
+    impact_temp <-VEP$IMPACT[match(df_VEP_temp[xx],VEP$mutation)]
+    impact_temp <- unique(impact_temp)
+    if (length(impact_temp) >1){
+      impact_temp <- sort(impact_temp)
+      v <- impact_temp[1]
+      for (k in 2:length(impact_temp)){
+        v <- paste0(v,"-",impact_temp[k])
+      }
+      impact_temp <- v
+    }
+    if (grepl("HIGH",impact_temp)){
+      impact_temp <- "HIGH"
+    }
+   df_GT_puro_iBAR$impact[df_GT_puro_iBAR$puroBC==names(mutation_list)[j]] <- impact_temp
+    
+    consequence_temp <- VEP$Consequence[match(df_VEP_temp[xx],VEP$mutation)]
+    if (length(consequence_temp) >1){
+      consequence_temp <- sort(consequence_temp)
+      v <- consequence_temp[1]
+      for (k in 2:length(consequence_temp)){
+        v <- paste0(v,";",consequence_temp[k])
+      }
+       consequence_temp <- v
+    }
+    df_GT_puro_iBAR$consequence[df_GT_puro_iBAR$puroBC==names(mutation_list)[j]] <- consequence_temp
+    
+    SIFT_temp <- VEP$SIFT[match(df_VEP_temp[xx],VEP$mutation)]
+    if (length(SIFT_temp) >1){
+      SIFT_temp <- sort(SIFT_temp)
+      v <- SIFT_temp[1]
+      for (k in 2:length(SIFT_temp)){
+        v <- paste0(v,";",SIFT_temp[k])
+      }
+       SIFT_temp <- v
+    }
+    df_GT_puro_iBAR$SIFT[df_GT_puro_iBAR$puroBC==names(mutation_list)[j]] <- SIFT_temp
+    
+    PolyPhen_temp <- VEP$PolyPhen[match(df_VEP_temp[xx],VEP$mutation)]
+    if (length(PolyPhen_temp) >1){
+      PolyPhen_temp <- sort(PolyPhen_temp)
+      v <- PolyPhen_temp[1]
+      for (k in 2:length(PolyPhen_temp)){
+        v <- paste0(v,";",PolyPhen_temp[k])
+      }
+       PolyPhen_temp <- v
+    }
+    df_GT_puro_iBAR$PolyPhen[df_GT_puro_iBAR$puroBC==names(mutation_list)[j]] <- PolyPhen_temp
+    
+    MaxEntScan_diff_temp <- as.double(VEP$MaxEntScan_diff[match(df_VEP_temp[xx],VEP$mutation)])
+    MaxEntScan_diff_temp <- MaxEntScan_diff_temp[!(is.na(MaxEntScan_diff_temp))]
+    if (length(MaxEntScan_diff_temp)>0){
+    df_GT_puro_iBAR$MaxEntScan_diff[df_GT_puro_iBAR$puroBC==names(mutation_list)[j]] <- MaxEntScan_diff_temp[which.max(abs(MaxEntScan_diff_temp))]}
+    
+  homozygous_edits_temp <- df_VEP_temp[xx]
+    if (length(homozygous_edits_temp) >1){
+      homozygous_edits_temp <- sort(homozygous_edits_temp)
+      v <- homozygous_edits_temp[1]
+      for (k in 2:length(homozygous_edits_temp)){
+        v <- paste0(v,";",homozygous_edits_temp[k])
+      }
+       homozygous_edits_temp <- v
+    }
+    df_GT_puro_iBAR$homozygous_edits[df_GT_puro_iBAR$puroBC==names(mutation_list)[j]] <- homozygous_edits_temp
+    
+  }
+}
+
+df_GT_puro_iBAR$worst_consequence <- df_GT_puro_iBAR$consequence
+df_GT_puro_iBAR$worst_consequence[grepl("stop codon",df_GT_puro_iBAR$worst_consequence)] <- "stop codon"
+df_GT_puro_iBAR$worst_consequence[grepl("start lost",df_GT_puro_iBAR$worst_consequence)] <- "start lost"
+df_GT_puro_iBAR$worst_consequence[grepl("splice variant",df_GT_puro_iBAR$worst_consequence)] <- "splice variant"
+df_GT_puro_iBAR$worst_consequence[grepl("missense",df_GT_puro_iBAR$worst_consequence)] <- "missense"
+df_GT_puro_iBAR$worst_consequence[grepl("promoter",df_GT_puro_iBAR$worst_consequence)] <- "promoter"
+df_GT_puro_iBAR$worst_consequence[grepl("intron",df_GT_puro_iBAR$worst_consequence)] <- "intron"
+
+df_GT_puro_iBAR$impact[grepl("HIGH",df_GT_puro_iBAR$impact)] <- "HIGH"
+df_GT_puro_iBAR$impact[grepl("MODERATE",df_GT_puro_iBAR$impact)] <- "MODERATE"
+df_GT_puro_iBAR$impact[grepl("MODIFIER",df_GT_puro_iBAR$impact)] <- "MODIFIER"
+
+df_GT_puro_iBAR$PolyPhen[grepl("probably_damaging",df_GT_puro_iBAR$PolyPhen)] <- "probably_damaging"
+df_GT_puro_iBAR$PolyPhen[grepl("possibly_damaging",df_GT_puro_iBAR$PolyPhen)] <- "possibly_damaging"
+df_GT_puro_iBAR$PolyPhen[grepl("benign",df_GT_puro_iBAR$PolyPhen)] <- "benign"
+df_GT_puro_iBAR$PolyPhen[grepl("-",df_GT_puro_iBAR$PolyPhen)] <- NA
+
+df_GT_puro_iBAR$SIFT[grepl("deleterious",df_GT_puro_iBAR$SIFT)] <- "deleterious"
+df_GT_puro_iBAR$SIFT[grepl("tolerated",df_GT_puro_iBAR$SIFT)] <- "tolerated"
+df_GT_puro_iBAR$SIFT[grepl("-",df_GT_puro_iBAR$SIFT)] <- NA
+```
+
+Adding scores from a FACS-based screen from Coelho et al.(2023).
+
+```{r}
+original_gRNAs_info <- read.table("mutation_file_Coelho_2023.csv",sep=",",header=TRUE)
+original_gRNAs_info <- original_gRNAs_info[grepl("BE3-NGG",original_gRNAs_info$editor),]
+original_gRNAs_info_JAK1 <- original_gRNAs_info[grepl("JAK1",original_gRNAs_info$editor),]
+intersected_gRNA <- intersect(original_gRNAs_info$sgRNA_ID,df_GT_puro_iBAR$gRNA)
+intersected_gRNA_JAK1 <- intersect(intersected_gRNA,original_gRNAs_info_JAK1$sgRNA_ID)
+df_GT_puro_iBAR$zscore_proliferation <- NA
+for (j in 1:length(intersected_gRNA_JAK1)){
+  df_GT_puro_iBAR$zscore_proliferation[df_GT_puro_iBAR$gRNA %in% intersected_gRNA_JAK1[j]] <- original_gRNAs_info_JAK1$zscore_proliferation[original_gRNAs_info_JAK1$sgRNA_ID == intersected_gRNA_JAK1[j]]
+}
+```
+
+Adding mutational consequences based not on the actual mutations, but on those predicted to occur in Coelho et al.(2023).
+
+```{r}
+df_GT_puro_iBAR$predicted_consequence <- NA
+df_GT_puro_iBAR$predicted_consequence[df_GT_puro_iBAR$gRNA %in% setdiff(df_GT_puro_iBAR$gRNA,intersected_gRNA)] <- "not predicted"
+
+for (j in 1:length(intersected_gRNA)){
+  df_GT_puro_iBAR$predicted_consequence[df_GT_puro_iBAR$gRNA == intersected_gRNA[j]] <- unique(original_gRNAs_info$Consequence[original_gRNAs_info$sgRNA_ID == intersected_gRNA[j]])
+}
+df_GT_puro_iBAR$predicted_consequence[!(is.na(df_GT_puro_iBAR$predicted_consequence)) & as.double(df_GT_puro_iBAR$start) >= 64964978 &  as.double(df_GT_puro_iBAR$start) <= 64967543] <- "promoter"
+
+
+df_GT_puro_iBAR$citation <- NA
+for (j in 1:length(intersected_gRNA)){
+  df_GT_puro_iBAR$citation[df_GT_puro_iBAR$gRNA %in% intersected_gRNA[j]] <- unique(original_gRNAs_info$Citation[original_gRNAs_info$sgRNA_ID == intersected_gRNA[j]])
+}
+  
+saveRDS(df_GT_puro_iBAR,file= "GT_barcode_metadata.rds")
+```
+
+Computing edit points
+
+
+```{r}
+compute_editing_position <- function(start,strand,GT){
+  if (nchar(GT) >0 ){
+    temp_GT <- strsplit(GT,";")[[1]]
+    zygosity <- sapply(temp_GT,function(x) return(strsplit(x,"-")[[1]][2]))
+    position <- as.double(sapply(temp_GT,function(x) return(strsplit(x,"-")[[1]][1])))
+    if (strand == "+"){
+      edit_position <- position + 1 - as.double(start)
+    }else{
+      edit_position <- as.double(start) + 23 - position
+    }
+    return(data.frame(edit_position=edit_position,zygosity=zygosity))
+  }
+}
+df_GT_puro_iBAR_edited <- df_GT_puro_iBAR[df_GT_puro_iBAR$GT!="WT",]
+editing_matrix <- matrix(ncol=length(-10:25),nrow=nrow(df_GT_puro_iBAR_edited))
+colnames(editing_matrix) <- sapply(-10:25,toString)
+rownames(editing_matrix) <- df_GT_puro_iBAR_edited$puroBC
+edit_positions <- rep("",length(df_GT_puro_iBAR_edited$puroBC))
+for (j in 1:nrow(editing_matrix)){
+  tmp <- compute_editing_position(GT=df_GT_puro_iBAR_edited$GT[j],start=df_GT_puro_iBAR_edited$start[j],
+                         strand=df_GT_puro_iBAR_edited$strand[j])
+  tmp2 <- paste0(tmp$edit_position,"(",tmp$zygosity,")")
+  v <- tmp2[1]
+  if (length(tmp2) >1){
+    for (k in 2:length(tmp2)){
+      v <- paste0(v,";",tmp2[k])
+    }
+  }
+  edit_positions[j] <- v
+  xx <- intersect(colnames(editing_matrix),strsplit(toString(tmp$edit_position),", ")[[1]])
+  if (length(xx) >0 ){
+     editing_matrix[j,xx] <- tmp$zygosity[match(xx,strsplit(toString(tmp$edit_position),", ")[[1]])]
+  }
+
+}
+df_GT_puro_iBAR_edited$editing_positions <- edit_positions
+df_GT_puro_iBAR$editing_positions <- NA
+df_GT_puro_iBAR[df_GT_puro_iBAR$GT!="WT",] <- df_GT_puro_iBAR_edited
+
+editing_matrix_melt <- reshape2::melt(editing_matrix)
+editing_matrix_melt <- editing_matrix_melt[complete.cases(editing_matrix_melt),]
+colnames(editing_matrix_melt) <- c("barcode","position","zygosity")
+ggplot(editing_matrix_melt,aes(x=barcode,y=position,fill=zygosity)) + geom_tile()+
+ scale_fill_manual(values=c("0/0/1"= "darkblue","0/1/1"="purple","1/1/1"="darkred"),na.value = "white")+
+  theme_classic() + geom_hline(yintercept=4) + geom_hline(yintercept=9)+ theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) 
+
+df_GT_puro_iBAR
+```
+
+
+From bulk exome sequencing find mutations within the amplicon windows for comparison to frequent mutations found in the scDNA-seq data. 
+
+```{r}
+amplicons <- read.table("amplicons.txt")
+lower_bound <- as.double(amplicons$V2)
+upper_bound <- as.double(amplicons$V3)
+library(vcfR)
+exome_seq <- read.vcfR("HT-29.v1.caveman_c.annot.vcf")
+exome_seq_chr1 <- exome_seq@fix[exome_seq@fix[,1]=="chr1" ,]
+exome_gt_chr1 <- exome_seq@gt[exome_seq@fix[,1]=="chr1" ,]
+exome_seq_chr1_positions <- as.double(exome_seq_chr1[,2])
+xx <- list()
+for (j in 1:length(lower_bound)){
+  xx[[j]] <- exome_seq_chr1_positions  >= lower_bound[j]
+  xx[[j]][exome_seq_chr1_positions > upper_bound[j]] <- FALSE
+}
+bulk_mutations <- list()
+bulk_af <- list()
+for (j in 1:length(lower_bound)){
+  bulk_mutations[[j]] <- c()
+  bulk_af[[j]] <- c()
+  temp <- exome_seq_chr1[xx[[j]],,drop=FALSE]
+  if (length(temp) > 0){
+    temp_gt <- exome_gt_chr1[xx[[j]],,drop=FALSE]
+    bulk_mutations[[j]] <- paste0(temp[1,2],"-",temp[1,4],"-",temp[1,5])
+    bulk_af[[j]] <- strsplit(temp_gt[1,3],":")[[1]][10]
+    if(length(temp) > 8){
+      for (k in 1:nrow(temp)){
+      bulk_mutations[[j]] <- c(bulk_mutations[[j]],paste0(temp[k,2],"-",temp[k,4],"-",temp[k,5]))
+      bulk_af[[j]] <- c(bulk_af[[j]],strsplit(temp_gt[k,3],":")[[1]][10])
+    }
+    }
+  }
+}
+df_bulk <- as.data.frame(cbind(unlist(bulk_mutations),unlist(bulk_af),(1:length(bulk_mutations))[sapply(bulk_mutations,function(x) !(is.null(x)))]))
+colnames(df_bulk) <- c("mutations","af","amplicon")
+df_bulk[,2]  <- as.double(df_bulk[,2])
+df_bulk
+saveRDS(df_GT_puro_iBAR,file= "GT_barcode_metadata.rds")
+write.table(df_GT_puro_iBAR,"GT_barcode_metadata.csv",sep=",",col.names=TRUE,row.names=FALSE,quote=FALSE)
+```
+

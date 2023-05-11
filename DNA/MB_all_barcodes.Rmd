@@ -1,0 +1,172 @@
+---
+title: "MissionBio: puro-barcode, gRNA, iBAR"
+output:
+  BiocStyle::html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes  
+---
+
+This notebook calls barcodes in cells from barcode read counts in cells for the DNA modality. 
+
+```{r,setup}
+source("../core_functions.R")
+library(dplyr)
+library(stringr)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+set.seed(99)#need to set seed for reproducibility, as there is some stochasticity in barcode assignment
+```
+
+
+We use mixtures of skewed normal distributions of  counts to call puroR barcodes, gRNAs and iBARs in cells, see Methods in preprint and file "../core_functions.R".
+
+First, we call gRNA+iBAR combinations. 
+
+```{r}
+puroBC_assignment <- list()
+gRNA_iBAR_assignment <- list()
+for (kk in 1:4){
+  df_puro <- readRDS(paste0("MB_puroBC_",toString(kk),".rds"))
+  
+  puro_barcode_matrix <- reshape2::dcast(df_puro[,c(1,2,3)],cell~puro_barcode)
+  rownames(puro_barcode_matrix) <- puro_barcode_matrix[,1]
+  puro_barcode_matrix <- puro_barcode_matrix[,-1]
+  puro_barcode_matrix[is.na(puro_barcode_matrix)] <- 0
+  puroBC_assignment[[kk]] <-  barcode_calling(t(puro_barcode_matrix),sample_name=paste0("puroBC_sample_",toString(kk)),barcode_name="puro-barcode",thresh=2,g=3)
+
+
+  df_gRNA_iBAR <- readRDS(paste0("MB_gRNA_iBAR_",toString(kk),".rds"))
+  df_gRNA_iBAR$gRNA_iBAR <- paste0(df_gRNA_iBAR$gRNA,",",df_gRNA_iBAR$iBAR)
+  gRNA_iBAR_matrix <- reshape2::dcast(df_gRNA_iBAR[,c(3,5,4)],cell~gRNA_iBAR,value.var="n")
+  rownames_gRNA_iBAR_matrix <- gRNA_iBAR_matrix[,1]
+  gRNA_iBAR_matrix <- gRNA_iBAR_matrix[,-1]
+  gRNA_iBAR_matrix  <- mapply(as.double,gRNA_iBAR_matrix )
+  gRNA_iBAR_matrix[is.na(gRNA_iBAR_matrix)] <- 0
+  rownames(gRNA_iBAR_matrix) <- rownames_gRNA_iBAR_matrix
+  
+  gRNA_iBAR_assignment[[kk]] <-  barcode_calling(t(gRNA_iBAR_matrix),sample_name=paste0("gRNA_iBAR_sample_",toString(kk)),barcode_name="gRNA_iBAR",thresh=2,g=3)
+
+}
+```
+
+
+```{r}
+puroBC_assignment <- sapply(1:4,function(n) {y <- puroBC_assignment[[n]]$barcode_assignment$barcode_assignment; 
+  names(y) <- paste0(substring(names(y),1,19),toString(n));return(y)})
+puroBC_assignment <- do.call(c,puroBC_assignment)
+gRNA_iBAR_assignment <- sapply(1:4,function(n) {y <- gRNA_iBAR_assignment[[n]]$barcode_assignment$barcode_assignment; 
+  names(y) <- paste0(substring(names(y),1,19),toString(n));return(y)})
+gRNA_iBAR_assignment <- do.call(c,gRNA_iBAR_assignment)
+
+saveRDS(puroBC_assignment,file="puroBC_assignment.rds")
+saveRDS(gRNA_iBAR_assignment,file="gRNA_iBAR_assignment.rds")
+```
+
+
+```{r}
+puroBC_assignment <- readRDS("puroBC_assignment.rds")
+gRNA_iBAR_assignment <- readRDS("gRNA_iBAR_assignment.rds")
+```
+
+
+We keep barcodes that occur on their own (without other barcodes present) in at least one cell, and for each other barcode do not co-occur for more than 10% of the cells and more than one cell. We keep only these barcodes, as it is unlikely that the same gRNA+(random)iBAR combination or the same random puroR barcode would occur in two different subclones. Rather, this is indicative of a mistake not calling the second barcode in a cell because of low barcode counts. 
+
+```{r}
+gRNA_iBAR_1 <- unique(gRNA_iBAR_assignment[!(grepl("-",gRNA_iBAR_assignment))])
+# all gRNA_iBAR combinations that occur on their own (without other barcodes in the same cell) 
+# in at least one cell 
+gRNA_iBAR_keep <- c()
+for (j in 1:length(gRNA_iBAR_1)){
+  xx <- gRNA_iBAR_assignment[grepl(gRNA_iBAR_1[j],gRNA_iBAR_assignment)]#cells with the barcode
+  yy <- table(xx)[grepl("-",names(table(xx)))]#cells with the barcode and at least one other barcode
+  if(all(yy <= 1) | all(yy/length(xx) <= 0.1)){
+    gRNA_iBAR_keep <- c(gRNA_iBAR_keep,gRNA_iBAR_1[j])#keeping the barcodes that only occur with each other
+    # barcode for 10% of the cells 
+  }
+}
+```
+
+
+```{r}
+gRNA_iBAR_assignment <- gRNA_iBAR_assignment[gRNA_iBAR_assignment%in%gRNA_iBAR_keep]
+```
+
+
+We repeat the same with the puro-barcodes
+
+```{r}
+puroBC_1 <- unique(puroBC_assignment[!(grepl("-",puroBC_assignment))])
+puroBC_keep <- c()
+for (j in 1:length(puroBC_1)){
+  xx <- puroBC_assignment[grepl(puroBC_1[j],puroBC_assignment)]
+  yy <- table(xx)[grepl("-",names(table(xx)))]
+  if(all(yy <= 1) | all(yy/length(xx) <= 0.1)){
+    puroBC_keep <- c(puroBC_keep,puroBC_1[j])
+  }
+}
+puroBC_assignment <- puroBC_assignment[puroBC_assignment%in%puroBC_keep]
+```
+
+
+Cells with either puro-barcode or gRNA-iBAR combination assigned
+
+```{r}
+any_assignment <- data.frame(cells=unique(c(names(puroBC_assignment),names(gRNA_iBAR_assignment))))
+any_assignment$gRNA_iBAR <- NA
+any_assignment$gRNA_iBAR[match(names(gRNA_iBAR_assignment),any_assignment$cell)] <- gRNA_iBAR_assignment
+any_assignment$puroBC <- NA
+any_assignment$puroBC[match(names(puroBC_assignment),any_assignment$cell)] <- puroBC_assignment
+```
+
+Find gRNA-iBAR and puro-barcodes correspondence
+
+```{r}
+any_assignment_count <- any_assignment[,2:3] %>% dplyr::group_by_all() %>% dplyr::count()
+any_assignment_count <- any_assignment_count[complete.cases(any_assignment_count),]
+any_assignment_count <- any_assignment_count[any_assignment_count$n>1,]
+```
+
+Remove lines with duplicated gRNA-iBAR or duplicated puroBC
+
+```{r}
+gRNA_iBAR_remove <- unique(any_assignment_count$gRNA_iBAR[duplicated(any_assignment_count$gRNA_iBAR)])
+puroBC_remove <- unique(any_assignment_count$puroBC[duplicated(any_assignment_count$puroBC)])
+
+any_assignment_count <- any_assignment_count[(!(any_assignment_count$gRNA_iBAR%in%gRNA_iBAR_remove)) & 
+              (!(any_assignment_count$puroBC%in%puroBC_remove)),]
+any_assignment <- any_assignment[(!(any_assignment$gRNA_iBAR%in%gRNA_iBAR_remove)) & 
+              (!(any_assignment$puroBC%in%puroBC_remove)),]
+```
+
+We now assign puro-barcodes and gRNA-iBAR combinations using the correspondence between gRNA-iBAR and puro-barcode established above
+
+```{r}
+any_assignment_na_iBAR <- any_assignment[is.na(any_assignment$gRNA_iBAR),]
+for (j in 1:length(any_assignment_count$puroBC)){
+  any_assignment_na_iBAR$gRNA_iBAR[any_assignment_na_iBAR$puroBC==any_assignment_count$puroBC[j]] <- any_assignment_count$gRNA_iBAR[j]
+}
+any_assignment_na_puroBC<- any_assignment[is.na(any_assignment$puroBC),]
+for (j in 1:length(any_assignment_count$puroBC)){
+  any_assignment_na_puroBC$puroBC[any_assignment_na_puroBC$gRNA_iBAR==any_assignment_count$gRNA_iBAR[j]] <- any_assignment_count$puroBC[j]
+}
+any_assignment[is.na(any_assignment$gRNA_iBAR),] <- any_assignment_na_iBAR
+any_assignment[is.na(any_assignment$puroBC),] <- any_assignment_na_puroBC
+```
+
+
+```{r}
+saveRDS(any_assignment,"barcode_assignment_MB.rds")
+```
+
+
+Cell numbers for the barcodes
+
+```{r}
+nr_barcodes <- table(any_assignment$puroBC)
+p_puro_barcode_representation <- ggplot(mapping=aes(x=log2(nr_barcodes))) + geom_histogram()+ theme_classic(base_size=13)  +
+xlab(paste0("log2(number of cells per barcode)")) + ylab("number of barcodes")
+print(p_puro_barcode_representation)
+```
+
+
+Numbers of barcodes with at least 3 cells: `r length(names(table(any_assignment$puroBC))[table(any_assignment$puroBC)>2])`.
