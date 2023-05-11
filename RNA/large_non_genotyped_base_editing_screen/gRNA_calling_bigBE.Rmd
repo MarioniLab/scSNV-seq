@@ -1,0 +1,104 @@
+---
+title: "gRNA calling for large BE screen"
+author: "Magdalena Strauss"
+output:
+  BiocStyle::html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes  
+---
+
+This notebook performs gRNA calling from gRNA UMI counts after QC for the large non-genotyped base-editor screen. 
+
+```{r}
+# knitr::opts_chunk$set(
+#     echo = FALSE,
+#     message = FALSE,
+#     warning = FALSE,
+#     message = FALSE,
+#     dev = c("pdf"),
+#     dpi=300
+# )
+chooseCRANmirror(ind=69)
+core_function_file <- "../core_functions.R"
+source(core_function_file)
+library(dplyr)
+library(batchelor)
+set.seed(12345)
+
+folders_cellranger_gRNA <-  paste0("/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/bigBE_",sapply(1:4,toString),"/outs")
+folders_cellranger_iBAR <-  paste0("/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/bigBE_iBAR",sapply(1:4,toString),"/outs")
+file_name_gRNA_assignment <- "gRNA_assignment_bigBE.rds"
+file_name_sce_list_after_QC <- "sce_list_bigBE.rds"
+file_name_sce_list_after_gRNA_iBAR_assignment <- "sce_bigBE_gRNA_iBAR.rds"
+ids <- c("sample1","sample2","sample3","sample4")
+
+```
+
+
+Read in the SingleCellExperiments after QC. 
+
+```{r}
+sce_list <- readRDS(file_name_sce_list_after_QC)
+for (j in 1:length(folders_cellranger_gRNA)){
+  colnames(sce_list[[j]]) <- paste0(substring(colnames(sce_list[[j]]),1,17),toString(j))
+}
+
+```
+
+Reading in the gRNA matrices.
+
+```{r}
+gRNA_matrices <- list()
+for (k in 1:length(folders_cellranger_gRNA)){
+  matrix_temp <- read_in_raw_matrix(folders_cellranger_gRNA[k])
+  gRNA_matrices[[k]] <- matrix_temp[!(grepl("ENS",rownames(matrix_temp))),]
+  colnames(gRNA_matrices[[k]]) <- paste0(substring(colnames(gRNA_matrices[[k]]),1,16),"-",toString(k))
+  gRNA_matrices[[k]] <- gRNA_matrices[[k]][,colnames(gRNA_matrices[[k]])%in%colnames(sce_list[[k]])]
+}
+```
+
+gRNA assignment
+
+```{r,fig.width=13,fig.height=7}
+gRNA_assignment <- list()
+for (j in 1:length(ids)){
+  gRNA_assignment[[j]] <- barcode_calling( gRNA_matrices[[j]],paste0("gRNA ",ids[j]),thresh=2,g=2)
+}
+names(gRNA_assignment) <- ids
+saveRDS(gRNA_assignment,file=file_name_gRNA_assignment)
+```
+
+Adding gRNAs to the SingleCellExperiments. 
+
+```{r}
+for (j in 1:length(sce_list)){
+  sce_list[[j]]$gRNA <- NA
+}
+
+
+for (j in 1:length(sce_list)){
+  xx <- intersect(colnames(sce_list[[j]]),names(gRNA_assignment[[j]]$barcode_assignment$barcode_assignment))
+  sce_list[[j]] <- sce_list[[j]][,xx]
+  # removing cells without a gRNA assigned
+  sce_list[[j]]$gRNA <- gRNA_assignment[[j]]$barcode_assignment$barcode_assignment[xx]
+}
+
+#
+
+for (j in 1:length(sce_list)){
+  sce_list[[j]] <- sce_list[[j]][,!(grepl("-",sce_list[[j]]$gRNA))]
+}
+
+```
+
+
+
+Saving the SingleCellExperiments. 
+
+```{r}
+sce_list <- multiBatchNorm(sce_list)
+merged_sce <- do.call(cbind,sce_list)
+saveRDS(merged_sce,file_name_sce_list_after_gRNA_iBAR_assignment)
+```
+

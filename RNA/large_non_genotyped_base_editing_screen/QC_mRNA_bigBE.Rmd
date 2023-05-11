@@ -1,0 +1,85 @@
+---
+title: "QC for mRNA data - large BE data set"
+author: "Magdalena Strauss"
+output:
+  BiocStyle::html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes  
+---
+
+This notebook performs outlier-based QC for the non-genotyped large base editor screen, removing low outliers for the total count, low outliers for the number of detected features and high outliers for the percentage of counts from mitochondrial genes.
+
+```{r}
+# knitr::opts_chunk$set(
+#     echo = FALSE,
+#     message = FALSE,
+#     warning = FALSE,
+#     message = FALSE,
+#     dev = "pdf",
+#     dpi=300
+# )
+
+source("../core_functions.R")
+
+library(Matrix)
+library(ggplot2)
+library(AnnotationHub)
+library(AnnotationDbi)
+library(scran)
+library(scater)
+library(igraph)
+library(gridExtra)
+
+folders_cellranger <- paste0("/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/bigBE_",sapply(1:4,toString),"/outs")
+file_name_mRNA_matrices <- "mRNA_matrices_bigBE.rds"
+file_name_mRNA_matrices_QC <- "mRNA_matrices_QC_bigBE.rds"
+file_name_sces <- "sce_list_bigBE.rds"
+ids <- c("sample1","sample2","sample3","sample4")
+```
+
+```{r}
+mRNA_matrices <- list()
+total_cell_number <- 0
+for (k in 1:length(folders_cellranger)){
+ matrix_temp <- read_in_filtered_matrix(folders_cellranger[k])
+  mRNA_matrices[[k]] <- matrix_temp[grepl("ENS",rownames(matrix_temp)),]
+  total_cell_number <- total_cell_number + ncol(mRNA_matrices[[k]])
+}
+names(mRNA_matrices) <- ids
+saveRDS(mRNA_matrices,file_name_mRNA_matrices)
+```
+
+The total number of cells before QC is `r total_cell_number`.
+
+```{r}
+discard <- list()
+mRNA_matrices_QC <- list()
+total_cell_number_after_QC <- 0
+for (j in 1:length(mRNA_matrices)){
+  discard[[j]] <- QC_mRNA_outlier(mRNA_matrices[[j]],file_name = paste0("Sample_",ids[j]))
+  mRNA_matrices_QC[[j]] <- mRNA_matrices[[j]][,!(discard[[j]])]
+  total_cell_number_after_QC <- total_cell_number_after_QC + ncol(mRNA_matrices_QC[[j]])
+}
+names(mRNA_matrices_QC) <- ids
+saveRDS(mRNA_matrices_QC,file=file_name_mRNA_matrices_QC)
+```
+
+The total number of cells after QC is `r  total_cell_number_after_QC`.
+
+```{r}
+set.seed(42)
+
+sce_list <- list()
+for (j in 1:4){
+  sce_list[[j]] <- SingleCellExperiment(
+    assays = list(counts = mRNA_matrices_QC[[j]]), colData = colnames(mRNA_matrices_QC[[j]]))
+  clusts = as.numeric(quickCluster(sce_list[[j]], method = "igraph", min.size = 100))
+  sce_list[[j]] = computeSumFactors(sce_list[[j]], clusters = clusts)
+  sce_list[[j]] <- logNormCounts(sce_list[[j]])
+}
+names(sce_list) <- ids
+saveRDS(sce_list,file=file_name_sces)
+```
+
+

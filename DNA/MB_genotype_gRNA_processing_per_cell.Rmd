@@ -1,0 +1,157 @@
+---
+title: "Per-cell processing of scDNA-seq data"
+output:
+  BiocStyle::html_document:
+    number_sections: yes
+    toc: yes  
+---
+
+This notebook processes genotype calls for individual cells, prior to the per barcode-based analysis. It is run after a cell-based genotype calling with GATK and after barcode calling using MB_all_barcodes.Rmd. 
+
+```{r,setup}
+knitr::opts_chunk$set(message = FALSE)
+source("core_functions_MissionBio.R")
+library(dplyr)
+```
+
+# Processing genotype calls on a per-cell basis
+
+We load the genotypes, aggregate them across the four samples and subset to C->T mutations.
+
+```{r}
+genotype_list_per_cell <- list()
+genotype_list_C_T_per_cell <- list()
+
+for (kk in 1:4){
+  genotype_list_per_cell[[kk]] <- readRDS(paste0("variant_calling/run_",kk,"/vcf/genotypes_run_",kk,".rds"))
+  genotype_list_C_T_per_cell[[kk]] <- lapply(genotype_list_per_cell[[kk]],subset_C_T)
+  names(genotype_list_C_T_per_cell[[kk]]) <- paste0(substring(names(genotype_list_per_cell[[kk]]),1,19),toString(kk))
+}
+genotype_list_C_T_per_cell <- do.call(c,genotype_list_C_T_per_cell)
+genotype_list_per_cell <- do.call(c,genotype_list_per_cell)
+```
+
+We assign gRNAs, iBARs and puro-barcodes to each cell and genotype. 
+
+```{r}
+barcode_assignment <- readRDS("barcode_assignment_MB.rds")
+barcode_assignment$gRNA <- unlist(lapply(barcode_assignment$gRNA_iBAR,function(x) strsplit(x,",")[[1]][1]))
+barcode_assignment$iBAR <- unlist(sapply(barcode_assignment$gRNA_iBAR,function(x) strsplit(x,",")[[1]][2]))
+
+feature_ref <- read.table("../10x/feature_ref.csv",sep=",",header=TRUE)
+library(Biostrings)
+seqs <- as.vector(reverseComplement(DNAStringSet(feature_ref$sequence)))
+gRNA_ids <- feature_ref$id
+names(gRNA_ids) <- seqs
+gRNAs <- gRNA_ids[barcode_assignment$gRNA]
+iBARs <- barcode_assignment$iBAR
+puro_barcodes <- barcode_assignment$puroBC
+names(puro_barcodes) <- barcode_assignment$cells
+names(gRNAs) <- barcode_assignment$cells
+names(iBARs) <- barcode_assignment$cells
+for (j in 1:length(genotype_list_C_T_per_cell)){
+  genotype_list_C_T_per_cell[[j]]$cell <- rep(names(genotype_list_C_T_per_cell)[j],nrow(genotype_list_C_T_per_cell[[j]]))
+  genotype_list_C_T_per_cell[[j]]$puroBC <- rep(puro_barcodes[names(genotype_list_C_T_per_cell)[j]],nrow(genotype_list_C_T_per_cell[[j]]))
+   genotype_list_C_T_per_cell[[j]]$gRNA <- rep(gRNAs[names(genotype_list_C_T_per_cell)[j]],nrow(genotype_list_C_T_per_cell[[j]]))
+    genotype_list_C_T_per_cell[[j]]$iBAR <- rep(iBARs[names(genotype_list_C_T_per_cell)[j]],nrow(genotype_list_C_T_per_cell[[j]]))
+}
+
+```
+
+
+```{r}
+genotype_list_C_T_per_cell_sub <- lapply(genotype_list_C_T_per_cell,function(x) {y <- x[c("pos","type","ref","alt","puroBC","gRNA","iBAR")];
+rownames(y) <- NULL; return(y)})
+mutation_list_C_T_per_cell_sub2 <- list()
+for (j in 1:length(genotype_list_C_T_per_cell_sub)){
+    temp <- genotype_list_C_T_per_cell_sub[[j]]
+    temp <- apply(temp,1,function(x) paste(x[1],x[2],x[3],x[4],sep="-"))
+    mutation_list_C_T_per_cell_sub2[[j]] <- data.frame(genotype=temp,puroBC=genotype_list_C_T_per_cell_sub[[j]]$puroBC,
+          gRNA=genotype_list_C_T_per_cell_sub[[j]]$gRNA,
+          iBAR=genotype_list_C_T_per_cell_sub[[j]]$iBAR,
+              cell=names(genotype_list_C_T_per_cell_sub)[j])}
+df_mutation_puroBC <- do.call(rbind,mutation_list_C_T_per_cell_sub2)
+colnames(df_mutation_puroBC) <- c("mutation","puroBC","gRNA","iBAR","cell")
+df_mutation_puroBC <- df_mutation_puroBC[!(is.na(df_mutation_puroBC$puroBC)),]
+```
+
+Computing the frequency of mutations
+
+```{r}
+sort(table(df_mutation_puroBC$mutation),decreasing = TRUE)[1:30]/length(unique(df_mutation_puroBC$cell))
+
+```
+
+Removing frequent mutations - as these occur in the entire population or a larger subclone and are not cause by the base-editing.
+
+```{r}
+positions.exclude <- unique(sapply(names(table(df_mutation_puroBC$mutation))[table(df_mutation_puroBC$mutation)/length(unique(df_mutation_puroBC$cell))>0.1],function(x) strsplit(x,"-")[[1]][1]))
+mutations.exclude <- c()
+for (j in 1:length(unique(df_mutation_puroBC$mutation))){
+  mutations.exclude <- c(mutations.exclude,unique(df_mutation_puroBC$mutation)[grepl(positions.exclude[j],unique(df_mutation_puroBC$mutation))])
+}
+mutations.exclude <- unique(mutations.exclude)
+df_mutation_puroBC_all <- df_mutation_puroBC
+df_mutation_puroBC$mutation[df_mutation_puroBC_all$mutation%in%mutations.exclude] <- "-"
+df_mutation_puroBC <- dplyr::distinct(df_mutation_puroBC)
+```
+
+Number of genotypes excluding frequent mutations
+
+```{r}
+GTs <- rep("",length(unique(df_mutation_puroBC$cell)))
+
+for (j in 1:length(unique(df_mutation_puroBC$cell))){
+  temp <- df_mutation_puroBC$mutation[df_mutation_puroBC$cell == unique(df_mutation_puroBC$cell)[j]]
+  GTs[j] <- temp[1]
+  if (length(temp) > 1){
+    for (k in 2:length(temp)){
+    GTs[j] <- paste0(GTs[j],";",temp[k])
+  }
+  }
+}
+df_GT <- data.frame(GT=GTs,cell=unique(df_mutation_puroBC$cell))
+length(unique(df_GT$GT))
+
+```
+
+We keep cells where puroBC and iBAR barcodes agree. 
+
+```{r}
+df_GT$puroBC <- puro_barcodes[df_GT$cell]
+df_GT$gRNA <- gRNAs[df_GT$cell]
+df_GT$iBAR <- iBARs[df_GT$cell]
+df_GT$puroBC_gRNA_iBAR <- paste0(df_GT$puroBC,"-",df_GT$gRNA,"-",df_GT$iBAR)
+```
+
+Which gRNAs are covered by what amplicon?
+
+```{r}
+amplicon_coordinates <- read.table("JAK1_amplicons_hg38/CO259_sanger_031021_hg38.bed")
+colnames(amplicon_coordinates) <- c("chr","start","end","amplicon")
+amplicon_coordinates$start <- as.double(amplicon_coordinates$start)
+amplicon_coordinates$end <- as.double(amplicon_coordinates$end)
+gRNA_coordinates <- read.table("gRNA_info_coordinates.csv",sep=",",header=TRUE)
+find_amplicon <- function(x){
+   return(amplicon_coordinates$amplicon[(amplicon_coordinates$start < x) & 
+                   (amplicon_coordinates$end > x)])
+}
+ find_amplicon(as.double(gRNA_coordinates$start)[1])
+as.double(gRNA_coordinates$start)
+```
+
+Number of cells with unique barcodes assigned 
+
+```{r}
+for (kk in 1:4){
+  temp <- read.table(paste0("sum_counts_tapestri/output_tapestri_",toString(kk),".tube1.cellfinder.barcode.distribution.tsv"))
+  colnames(temp) <- paste0(substring(colnames(temp),1,17),toString(kk))
+}
+```
+
+Saving 
+
+```{r}
+saveRDS(df_GT,file="genotypes_MB_per_cell.rds")
+```
+

@@ -1,0 +1,55 @@
+---
+title: "gRNA statistics for large base-editor screen"
+author: "Magdalena Strauss"
+output:
+  BiocStyle::html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes  
+---
+
+This notebook computes statistics and produces plots for gRNAs for the large base-editor screen without genotyping. 
+
+```{r}
+library(ggplot2)
+# knitr::opts_chunk$set(
+#     echo = FALSE,
+#     message = FALSE,
+#     warning = FALSE,
+#     message = FALSE,
+#     cache=FALSE,
+#     dev = c("pdf"),
+#     dpi=300
+# )
+library(dplyr)
+library(SingleCellExperiment)
+sce <- readRDS("10x/sce_bigBE_gRNA_analysed.rds")
+dim(sce)
+```
+
+
+# Number of gRNAs for each consequence
+
+```{r gRNAs_per_consequence}
+colours_consequence <-  c("stop codon"="darkred","missense"="red","splice variant"="orange","promoter"="yellow","UTR"="purple","het"="darkblue","WT"="#000000","intron"="green","synonymous"="#ADD8E6")
+
+df <- data.frame(gRNA=sce$gRNA,predicted_consequence=sce$predicted_consequence)
+df <- df %>% group_by_all() %>% dplyr::count()
+df <- df[,1:2]
+df_count <- data.frame(predicted_consequence=names(table(df$predicted_consequence)),n=as.vector(table(df$predicted_consequence)))
+
+  print(ggplot(df_count, aes(x="", y=n, fill=predicted_consequence)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = n),color="white", position = position_stack(vjust = 0.5))+
+  scale_fill_manual(values=colours_consequence)+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+```
+
+# Number of cells per gRNA
+
+```{r cells_per_gRNA}
+ggplot(mapping=aes(x=as.vector(table(sce$gRNA)))) + geom_histogram() + theme_classic(base_size=18) + scale_x_continuous(trans="log2")
+```
+
+Overall, there are `r length(unique(sce$gRNA))` gRNAs. 
+
+The mean number of cells per gRNA is `r round(ncol(sce)/length(unique(sce$gRNA)),0)`.

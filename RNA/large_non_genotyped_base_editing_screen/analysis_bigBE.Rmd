@@ -1,0 +1,290 @@
+---
+title: "Analysis of large BE data set - without using iBARs"
+author: "Magdalena Strauss"
+output:
+  html_document:
+    number_sections: yes
+    keep_md: yes
+---
+
+This script processing the large single-cell base editor screen with DNA-sequencing counterpart. 
+
+# Setup and loading SingleCellExperiment with gRNAs assigned
+
+```{r,setup}
+library(bluster)
+source("../core_functions.R")
+library("batchelor")
+library("scater")
+library(scran)
+library(dplyr)
+library(igraph)
+library(RColorBrewer)
+library(pheatmap)
+library(Seurat)
+library(MASS)
+library(clusterProfiler)
+library(DOSE)
+library(ReactomePA)
+library(org.Hs.eg.db)
+library(energy)
+library(ggrepel)
+library(uwot)
+set.seed(4444)
+
+knitr::opts_chunk$set(
+    echo = FALSE,
+    message = FALSE,
+    warning = FALSE,
+    message = FALSE,
+    cache=FALSE,
+    dev = c("pdf"),
+    dpi=300
+)
+
+sce_file <- "sce_bigBE_gRNA_iBAR.rds"
+sce_save_file <- "sce_bigBE_gRNA_analysed.rds"
+folder_cellranger <-"/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/bigBE_1/outs"
+markers_file <- paste0("markers_bigBE.csv")
+markers_file_full <- paste0("markers_bigBE_full.csv")
+
+colours_consequence <-  c("stop codon"="darkred","missense"="red","splice variant"="orange","promoter"="yellow","UTR"="purple","het"="darkblue","WT"="#000000","intron"="green","synonymous"="#ADD8E6")
+```
+
+Reading in SingleCellExperiment.
+
+```{r}
+sce <- readRDS(sce_file)
+features <- read.delim(paste0(folder_cellranger,"/filtered_feature_bc_matrix/features.tsv.gz"),header=FALSE,stringsAsFactors = FALSE)
+rowData(sce) <- features[match(rownames(sce),features$V1),]
+```
+
+Subsetting to cells with a unique gRNA and computing UMAP.
+
+```{r}
+sce <- sce[,!(is.na(sce$gRNA))]
+sce <- sce[,!(grepl("-",sce$gRNA))]
+```
+
+Adding meta data
+
+```{r}
+JAK1_mutagenesis <- read.table("../MissionBio/mutation_file_Coelho_2023.csv",header=TRUE,sep=",")
+sce$zscore_FACS <- JAK1_mutagenesis$zscore_FACS[match(sce$gRNA,JAK1_mutagenesis$sgRNA_ID)]
+sce$predicted_consequence <- JAK1_mutagenesis$Consequence[match(sce$gRNA,JAK1_mutagenesis$sgRNA_ID)]
+sce$zscore_proliferation <- JAK1_mutagenesis$zscore_proliferation[match(sce$gRNA,JAK1_mutagenesis$sgRNA_ID)]
+feature_ref <- read.table("feature_ref.csv",header=TRUE,sep=",")
+sce$target_gene <- feature_ref$target_gene_name[match(sce$gRNA,feature_ref$id)]
+```
+
+# Find gRNAs with similar transcriptional impact using lower dimensional representation
+
+## Identifying a group of impacted genes 
+
+Differential expression analysis for each gRNA compared to the nontargeting control identifies impacted genes. 
+
+```{r}
+sce$gRNA[sce$target_gene=="Non-Targeting"] <- "NT"
+gRNAs <- names(table(sce$gRNA[table(sce$gRNA) >= 10]))
+gRNAs <- setdiff(gRNAs,"NT")
+```
+
+Perform a Wilcoxon test for each gRNA with at least 10 cells identify differential expressino
+
+```{r, eval=FALSE}
+markers <- list()
+for (j in 1:length(gRNAs)){
+  sce_temp <- sce[,sce$gRNA%in%c("NT",gRNAs[j])]
+  temp <- findMarkers(sce_temp,groups=sce_temp$gRNA,test.type="wilcox")
+  temp <- temp[[gRNAs[j]]]
+  temp$gRNA <- gRNAs[j]
+  temp$target_gene <- sce_temp$gene[sce_temp$gRNA==gRNAs[j]][1]
+  temp$DE_gene <- rownames(temp)
+  temp$DE_gene_name <- rowData(sce_temp)$V2[match(rownames(temp),rownames(sce))]
+  temp$target_gene <- sce_temp$target_gene[which(sce_temp$gRNA==gRNAs[j])[1]]
+  markers[[j]] <- temp[order(rownames(temp)),]
+}
+FDRs <- lapply(markers,function(x) x$FDR)
+FDRs <- do.call(cbind,FDRs)
+FDRs <- apply(FDRs,1,p.adjust)
+for (j in 1:length(markers)){
+  markers[[j]]$FDR <- FDRs[j,]
+}
+markers <- do.call(rbind,markers)
+markers$rho <- abs(markers$summary.AUC-0.5)
+write.table(markers[markers$FDR<0.1,],file=markers_file,sep=",",col.names = TRUE,row.names=FALSE)
+write.table(markers,file=markers_file_full,sep=",",col.names = TRUE,row.names=FALSE)
+```
+
+Finding a basis of genes: we combine genes that are differentially expressed for at least of the gRNAs and the JAK-STAT pathway genes. 
+
+```{r }
+JAK_STAT_pathway_genes <- read.table("../JAK_STAT_pathway_genes.txt")$V1
+JAK_STAT_pathway_genes <- features$V1[match(JAK_STAT_pathway_genes,features$V2)]
+markers <-  read.table(markers_file,sep=",",header=TRUE)
+basis_of_genes <- unique(c(JAK_STAT_pathway_genes,markers$DE_gene))
+```
+
+The basis of genes has `r length(basis_of_genes)` genes. 
+
+PCA is now performed on this basis of genes. 
+
+```{r }
+reducedDims(sce)$PCA_basis <- calculatePCA(sce[rowData(sce)$V1%in%basis_of_genes,],ncomponents=50,scale=TRUE)
+```
+
+# UMAPs illustrating predicted consequences and previous bulk-based analysis
+
+First we compute UMAP coordinates. 
+
+```{r}
+sce_UMAP <- uwot::umap(reducedDims(sce)$PCA_basis,min_dist=0.5)
+reducedDims(sce)$UMAP <- sce_UMAP
+```
+
+Coloured by the FACS-based z-score obtained from Coelho, M. A. et al. Base editing screens map mutations affecting interferon-γ signaling in cancer. Cancer Cell 41, 288–303.e6 (2023).
+
+
+```{r umap_zscore_FACS}
+plotReducedDim(sce,colour_by = "zscore_FACS",dimred="UMAP")+ theme(legend.position = "bottom")
+```
+
+Plot of UMAP coloured by proliferation z-score (Coelho et al. 2023). 
+
+```{r umap_zscore_proliferation}
+plotReducedDim(sce,colour_by = "zscore_proliferation",dimred="UMAP")+ theme(legend.position = "bottom")
+```
+
+UMAP coloured by the consequence of the mutation predicted by Coelho et al. (2023). 
+
+```{r umap_predicted_consequence}
+plotReducedDim(sce,colour_by = "predicted_consequence",dimred="UMAP") +
+  scale_color_manual(values=colours_consequence)+
+  labs(color="predicted consequence")
+```
+Plotting the predicted consequences individually
+
+```{r umap_predicted_consequence_ind}
+sce$predicted_consequence[is.na(sce$predicted_consequence)] <- "WT"
+for (j in 1:length(unique(sce$predicted_consequence))){
+  sce_temp <- cbind(sce[,sce$predicted_consequence!=unique(sce$predicted_consequence)[j]],
+                   sce[,sce$predicted_consequence==unique(sce$predicted_consequence)[j]] )
+sce_temp$predicted_consequence[sce_temp$predicted_consequence!=unique(sce$predicted_consequence)[j]] <- NA
+print(plotReducedDim(sce_temp,colour_by = "predicted_consequence",dimred="UMAP") +
+  scale_color_manual(values=colours_consequence,na.value="lightgrey")+
+  labs(color="predicted consequence")+ theme_classic(base_size=12)+ theme(legend.position = "bottom")+guides(color=guide_legend(nrow=2,override.aes = list(size=3))))}
+```
+
+
+# Clustering 
+
+Louvain clustering is performed in the PC space. 
+
+```{r}
+g <- clusterCells(sce, use.dimred="PCA_basis", 
+    BLUSPARAM=NNGraphParam(cluster.fun="louvain"))
+sce$cluster <- g
+sce$cluster <- as.factor(sce$cluster)
+```
+
+Plotting the clusters on the UMAP
+
+```{r umap_clusters}
+plotReducedDim(sce,colour_by = "cluster",dimred="UMAP",point_size=0.3)+ theme_classic(base_size=12)+ theme(legend.position = "bottom")+guides(color=guide_legend(nrow=2,override.aes = list(size=3)))
+```
+
+Distribution of predicted mutational consequence across clusters
+
+```{r cluster_consequence}
+sce$predicted_consequence[is.na(sce$predicted_consequence)] <- "WT"
+print(ggplot(mapping=aes(x=sce$cluster,fill=sce$predicted_consequence)) +geom_bar(aes( y=..count../tapply(..count.., ..x.. ,sum)[..x..])) +
+     ylab("") +labs(fill="") + xlab("cluster") + theme_bw(base_size=15)+ggtitle("Predicted consequence")+
+  scale_fill_manual(values=colours_consequence) + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 4))+ylab("number of cells"))
+
+```
+
+Proportion of control gRNAs in each cluster
+
+```{r proportion_of_NT_gRNA}
+cluster_gRNA_count_matrix <- reshape2::acast(data.frame(gRNA=sce$gRNA,cluster=sce$cluster),gRNA~cluster)
+prop_NT_gRNA <- cluster_gRNA_count_matrix["NT",]/colSums(cluster_gRNA_count_matrix)
+ggplot(mapping=aes(x=names(prop_NT_gRNA),y=prop_NT_gRNA)) + geom_bar(stat="identity")+theme_classic(base_size=22)+xlab("cluster")+
+  ylab("proportion NT-gRNA")
+```
+
+Combining clusters with similar proportion of non-targeting gRNAs
+
+```{r meta_clusters_2}
+meta_clusters_2 <- kmeans(prop_NT_gRNA,centers=2)$cluster
+meta_clusters_2[meta_clusters_2==1] <- "LoF"
+meta_clusters_2[meta_clusters_2==2] <- "not_LoF"
+sce$meta_cluster_2 <- meta_clusters_2[sce$cluster]
+xx <- table(sce$meta_cluster_2[sce$gRNA=="NT"])
+if (xx["LoF"] > xx["not_LoF"]){
+  temp <- sce$meta_cluster_2
+  sce$meta_cluster_2[temp=="LoF"] <- "not_LoF"
+  sce$meta_cluster_2[temp=="not_LoF"] <- "LoF"
+}
+
+plotReducedDim(sce,colour_by = "meta_cluster_2",dimred="UMAP",point_size=0.3)+guides(color=guide_legend(nrow=2,override.aes = list(size=3))) + scale_color_manual(values=c("LoF"="purple","not_LoF"="#5C4033"))+ theme(legend.position = "bottom")+guides(color=guide_legend(nrow=2,override.aes = list(size=3)))
+```
+
+Distribution of predicted consequence over the two meta-clusters
+
+```{r meta_cluster_consequence}
+print(ggplot(mapping=aes(x=sce$meta_cluster_2,fill=sce$predicted_consequence)) +geom_bar(aes( y=..count../tapply(..count.., ..x.. ,sum)[..x..])) +
+     ylab("") +labs(fill="") + xlab("meta cluster") + theme_bw(base_size=15)+ggtitle("Predicted consequence")+
+  scale_fill_manual(values=colours_consequence) + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 4))+ylab("number of cells"))
+
+```
+
+# Differential expression analysis 
+
+Comparing cells with gRNAs with more than 70% of cells, and at least 3 cells, in meta-cluster LoF to non-targeting gRNAs.
+
+```{r DE_LoF}
+df_gRNA_meta_cluster <- data.frame(gRNA=sce$gRNA,meta_cluster=sce$meta_cluster_2)
+count_gRNA_meta_cluster <- df_gRNA_meta_cluster %>% dplyr::group_by_all() %>% dplyr::count()
+count_gRNA_meta_cluster <- count_gRNA_meta_cluster[order(count_gRNA_meta_cluster$gRNA),]
+count_gRNA_meta_cluster$freq <- NA
+for (j in 1:nrow(count_gRNA_meta_cluster)){
+  count_gRNA_meta_cluster$freq[j] <- count_gRNA_meta_cluster$n[j]/sum(count_gRNA_meta_cluster$n[count_gRNA_meta_cluster$gRNA==count_gRNA_meta_cluster$gRNA[j]])
+}
+xx <- count_gRNA_meta_cluster$n>=3
+xx[count_gRNA_meta_cluster$freq<0.7] <- F
+xx[count_gRNA_meta_cluster$meta_cluster!="LoF"] <- F
+count_gRNA_meta_cluster_LoF <- count_gRNA_meta_cluster[xx,]
+gRNAs_LoF <- count_gRNA_meta_cluster_LoF$gRNA
+sce_temp <- sce[,sce$gRNA%in%c(gRNAs_LoF,"NT")]
+sce_temp$LoF <- sce_temp$gRNA != "NT"
+markers_JAK_STAT_LoF <- findMarkers(sce_temp[JAK_STAT_pathway_genes,],group=sce_temp$LoF,test.type="wilcox")[["TRUE"]]
+markers_JAK_STAT_LoF$gene_name <- features$V2[match(rownames(markers_JAK_STAT_LoF),features$V1)]
+df <- markers_JAK_STAT_LoF[,c(3,4,6)]
+df <- as.data.frame(df)
+ggplot(df, aes(x=summary.AUC, y=-log10(FDR))) +
+    geom_point(aes(color="grey", size=1, alpha=0.4)) +
+    ggtitle('Volcano Plot - JAK-STAT pathway') +
+    labs(y=expression('-Log'[10]*' FDR'), x=expression('AUC')) +
+    theme_classic(base_size=20) +
+    theme(legend.position="none", plot.title = element_text(size = rel(1), hjust = 0.5))+
+    geom_text_repel(data=df[df$FDR<0.1,],aes(x = summary.AUC, y = -log10(FDR),label=gene_name),max.overlaps=100)+
+    geom_point(data=df[df$FDR<0.1,],aes(x = summary.AUC, y = -log10(FDR),color="red", size=1,alpha=0.4))+
+    scale_color_manual(values=c('gray','red'))+ scale_y_continuous(trans=scales::pseudo_log_trans(sigma=1,base = 1.05))+
+  geom_vline(xintercept = 0.5)+geom_hline(yintercept = 1)
+```
+
+Plotting the proportions of gRNAs in the LoF meta-cluster for gRNAs with at least 3 cells assigned. 
+
+```{r proportion_meta_cluster}
+gRNA_meta_cluster_count <- reshape2::acast(df_gRNA_meta_cluster,gRNA~meta_cluster)
+gRNA_meta_cluster_count <- gRNA_meta_cluster_count[rowSums(gRNA_meta_cluster_count)>=3,]
+gRNA_meta_cluster_freq <- t(apply(gRNA_meta_cluster_count,1,function(x) return(x/sum(x))))
+ggplot(mapping=aes(x=gRNA_meta_cluster_freq)) + geom_histogram()+theme_classic(base_size=20)+
+  xlab("proportion in LoF-cluster") + ylab("number of gRNAs")
+```
+
+
+```{r}
+saveRDS(sce,file=sce_save_file)
+saveRDS(JAK1_mutagenesis,file="JAK1_mutatgenesis_extended.rds")
+```

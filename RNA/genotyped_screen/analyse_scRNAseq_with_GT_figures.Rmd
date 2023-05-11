@@ -1,0 +1,812 @@
+---
+title: "Transcriptome analysis for scRNA-seq data set with corresponding scDNA-seq data set"
+author: "Magdalena Strauss"
+output:
+  html_document:
+    number_sections: yes
+    keep_md: yes
+---
+
+```{r}
+library(bluster)
+source("../core_functions.R")
+library("batchelor")
+library("scater")
+library(scran)
+library(dplyr)
+library(igraph)
+library(Biostrings)
+library(RColorBrewer)
+library(pheatmap)
+library(org.Hs.eg.db)
+library(ggthemes)
+library(clusterProfiler)
+library(ggrepel)
+library(energy)
+library(destiny)
+library(ggridges)
+library(batchelor)
+library(BiocNeighbors)
+library(mclust)
+set.seed(4444)
+
+knitr::opts_chunk$set(
+    echo = FALSE,
+    message = FALSE,
+    warning = FALSE,
+    message = FALSE,
+    cache=FALSE,
+    dev = c("pdf","png"),
+    dpi=300
+)
+```
+This notebook was used to analyse the RNA modality of the genotyped data set after QC and gRNA calling. 
+
+```{r}
+sce_file <- "sce_with_MissionBio_unique_barcode_no_cc_genes.rds"
+iBAR_reference_file <- "feature_ref_puro_iBAR.csv"
+gRNA_reference_file <- "feature_ref.csv"
+GT_file <- "../MissionBio/GT_barcode_metadata.rds"
+GT_file_csv<- "../MissionBio/GT_barcode_metadata.csv"
+sce_file_output <- "sce_with_GT.rds"
+folder_cellranger <- "/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/sampleA_cDNA_gRNA/outs"
+markers_file <- "markers_data_with_MB.csv"
+markers_file_all <- "markers_data_with_MB_all.csv"
+```
+
+
+# Linking to scDNA-seq data
+
+This section identifies in the RNA modality those cells that have a barcode robustly genotyped for the DNA modality. 
+
+```{r}
+sce <- readRDS(sce_file)
+features <- read.delim(paste0(folder_cellranger,"/filtered_feature_bc_matrix/features.tsv.gz"),header=FALSE,stringsAsFactors = FALSE)
+rowData(sce) <- features[match(rownames(sce),features$V1),]
+
+GT_info <- readRDS(GT_file)
+GTs <- sapply(GT_info$GT,function(x) strsplit(x,";")[[1]])
+GTs_hom <- sapply(GTs,function(x) x[grepl("1/1/1",x)])
+GTs_hom <- sapply(GTs_hom,function(x){v=x[1];if (length(x)>1){for (j in 2:length(x)){v=paste0(v,";",x[j])}};return(v)})
+GT_info$GT_hom <- GTs_hom
+GT_info$GT_hom[!(GT_info$any_homozygous)] <- "none"
+iBAR_ref <- read.table(iBAR_reference_file,header=TRUE,sep=",")
+iBAR_ref <- iBAR_ref[grepl("iBAR",iBAR_ref$id),]
+
+iBAR_seqs <- as.vector(Biostrings::reverseComplement(Biostrings::DNAStringSet(iBAR_ref$sequence)))
+names(iBAR_seqs) <- iBAR_ref$id
+iBAR_ref <- iBAR_ref[grepl("iBAR",iBAR_ref$id),]
+sce$gRNA_iBAR_seq <- paste0(sce$gRNA,"-",iBAR_seqs[sce$iBAR])
+```
+
+We subset the SingleCellExperiment to cells with a genotype identified in the DNA modality.  
+
+```{r}
+WT_gRNA_iBAR <- GT_info$gRNA_iBAR[GT_info$GT=="WT"]
+edited_gRNA_iBAR <-  GT_info$gRNA_iBAR[GT_info$GT!="WT"]
+sce_knownGT <- sce[,sce$gRNA_iBAR_seq %in% c(WT_gRNA_iBAR,edited_gRNA_iBAR)]
+```
+
+The resulting SingleCellObject has the following number of cells
+
+```{r}
+ncol(sce_knownGT)
+```
+
+
+```{r umap_known_GT}
+sce_knownGT$edited <- sce_knownGT$gRNA_iBAR_seq %in%edited_gRNA_iBAR
+```
+
+# Adding meta-data and integration with non-genotyped larger experiment
+
+We add meta data from Coelho, M. A. et al. Base editing screens map mutations affecting interferon-γ signaling in cancer. Cancer Cell 41, 288–303.e6 (2023)
+
+```{r}
+gRNA_data <- read.table("../MissionBio/mutation_file_Coelho_2023.csv",sep=",",header=TRUE)
+sce_knownGT$facs_z_score <- gRNA_data$zscore_FACS[match(sce_knownGT$gRNA,gRNA_data$sgRNA_ID)]
+sce_knownGT$prolif_z_score <- gRNA_data$zscore_proliferation[match(sce_knownGT$gRNA,gRNA_data$sgRNA_ID)]
+```
+
+We integrate the data with the larger experiment to transfer UMAP coordinates and cluster labels. 
+
+```{r}
+sce_bigBE <- readRDS("sce_bigBE_gRNA_analysed.rds")
+folder_cellranger <-"/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/bigBE_1/outs"
+
+features <- read.delim(paste0(folder_cellranger,"/filtered_feature_bc_matrix/features.tsv.gz"),header=FALSE,stringsAsFactors = FALSE)
+markers_bigBE <- read.table("markers_bigBE.csv",sep=",",header=TRUE)
+JAK_STAT_pathway_genes <- read.table("../JAK_STAT_pathway_genes.txt")$V1
+JAK_STAT_pathway_genes <- features$V1[match(JAK_STAT_pathway_genes,features$V2)]
+basis_of_genes <- unique(c(JAK_STAT_pathway_genes,markers_bigBE$DE_gene))
+basis_of_genes <- intersect(basis_of_genes,rownames(sce_bigBE))
+basis_of_genes <- intersect(basis_of_genes,rownames(sce_knownGT))
+joint_sce <- fastMNN(sce_bigBE[basis_of_genes,],sce_knownGT[basis_of_genes,])
+rownames(reducedDims(joint_sce)$corrected) <- colnames(joint_sce)
+joint_sce <- runUMAP(joint_sce,dimred="corrected")
+joint_mnn <- reducedDims(joint_sce)$corrected
+pre <- buildIndex(joint_mnn[1:ncol(sce_bigBE),], BNPARAM=KmknnParam())
+knns = BiocNeighbors::queryKNN(joint_mnn[1:ncol(sce_bigBE),], joint_mnn[-(1:ncol(sce_bigBE)),], k = 10, 
+                                 get.index = TRUE, get.distance = TRUE)
+k.mapped <- matrix(0,nrow=nrow(knns$index),ncol=ncol(knns$index))
+for (j in 1:nrow(knns$index))
+{
+  k.mapped[j,] <- as.vector(colnames(sce_bigBE)[knns$index[j,]])
+}
+sce_knownGT$nearest_bigBE_cell <- k.mapped[,1]
+
+
+
+clusters <-  matrix(0,nrow=nrow(knns$index),ncol=ncol(knns$index))
+  for (j in 1:nrow(knns$index))
+  {
+    xx <- match(k.mapped[j,], colnames(sce_bigBE))
+    clusters[j,] <- sce_bigBE$meta_cluster_2[xx]
+  }
+  
+  cluster.mapped <- rep("",nrow(clusters))
+  for (j in 1:nrow(clusters)){
+    cluster.mapped[j] <- getmode(clusters[j,],1:ncol(clusters))
+  }
+
+gRNAs <-  matrix(0,nrow=nrow(knns$index),ncol=ncol(knns$index))
+  for (j in 1:nrow(knns$index))
+  {
+    xx <- match(k.mapped[j,], colnames(sce_bigBE))
+    gRNAs[j,] <- sce_bigBE$gRNA[xx]
+  }
+  
+  gRNA.mapped <- rep("",nrow(gRNAs))
+  for (j in 1:nrow(gRNAs)){
+    gRNA.mapped[j] <- getmode(gRNAs[j,],1:ncol(gRNAs))
+  }
+
+  
+reducedDims(sce_knownGT)$UMAP <- reducedDims(sce_bigBE)$UMAP[sce_knownGT$nearest_bigBE_cell,]
+sce_knownGT$cluster <- cluster.mapped
+sce_knownGT$mapped_gRNA <- gRNA.mapped
+
+
+```
+
+UMAP plot of the integrated data set - cells of the non-genotyped experiment are in grey. The genotyped cells are in red (edited) or blue (WT). 
+
+```{r umap_projected}
+GT <- rep("WT",ncol(sce_knownGT))
+GT[sce_knownGT$edited] <- "edited"
+df_projected <- data.frame(umap_1=c(reducedDims(sce_bigBE)$UMAP[,1],reducedDims(sce_knownGT)$UMAP[,1]),
+umap_2=c(reducedDims(sce_bigBE)$UMAP[,2],reducedDims(sce_knownGT)$UMAP[,2]),genotyped=c(rep(NA,ncol(sce_bigBE)),
+                    GT))
+ggplot(df_projected,mapping=aes(x=umap_1,y=umap_2,color=genotyped)) + geom_point(size=0.3) + scale_color_manual(values=c("NA"="#D3D3D3","edited"="darkred","WT"="darkblue")) + theme_classic()+ theme(legend.position = "bottom") + theme_classic(base_size=16)+ theme(legend.position = "bottom")+guides(color=guide_legend(nrow=2))
+```
+
+Plotting the FACs z-scores based on only genotyped cells. WT cells are in grey. 
+
+```{r FACS_cluster_edited}
+sce_knownGT$facs_z_score_edited <- sce_knownGT$facs_z_score
+sce_knownGT$facs_z_score_edited[!(sce_knownGT$edited)] <- NA
+
+GT_info$zscore_facs <- gRNA_data$zscore_FACS[match(GT_info$gRNA,gRNA_data$sgRNA_ID)]
+GT_info$zscore_facs_edited <- GT_info$zscore_facs
+GT_info$zscore_facs_edited[!(GT_info$any_homozygous)] <- NA
+```
+
+
+```{r FACS_umap_edited}
+plotReducedDim(cbind(sce_knownGT[,is.na(sce_knownGT$facs_z_score_edited)],
+                 sce_knownGT[,!(is.na(sce_knownGT$facs_z_score_edited))]) ,colour_by="facs_z_score_edited",dimred="UMAP") +ggtitle("genotyped data") + theme(legend.position = "bottom")  + theme_classic(base_size=16)+ theme(legend.position = "bottom")
+#+guides(color=guide_legend(nrow=2))
+```
+Plotting the proliferation z-scores based on only genotyped cells. WT cells are in grey. 
+
+```{r prolif_cluster_edited}
+sce_knownGT$prolif_z_score_edited <- sce_knownGT$prolif_z_score
+sce_knownGT$prolif_z_score_edited[!(sce_knownGT$edited)] <- NA
+```
+
+
+```{r prolif_umap_edited}
+plotReducedDim(cbind(sce_knownGT[,is.na(sce_knownGT$prolif_z_score_edited)],
+                 sce_knownGT[,!(is.na(sce_knownGT$prolif_z_score_edited))]) ,colour_by="prolif_z_score_edited",dimred="UMAP") +ggtitle("genotyped data") + theme(legend.position = "bottom")  + theme_classic(base_size=16)+ theme(legend.position = "bottom")
+#+guides(color=guide_legend(nrow=2))
+```
+# UMAP plots illustrating distribution of mutational consequence
+
+The following plots highlight mutational consequences on the UMAPs.
+
+```{r }
+sce_knownGT$gene <- GT_info$gene[match(sce_knownGT$gRNA_iBAR_seq,GT_info$gRNA_iBAR)]
+sce_knownGT$consequence <- GT_info$worst_consequence[match(sce_knownGT$gRNA_iBAR_seq ,GT_info$gRNA_iBAR)]
+sce_knownGT$consequence[!(sce_knownGT$edited)] <- "WT"
+sce_knownGT$any_homozygous <- GT_info$any_homozygous[match(sce_knownGT$gRNA_iBAR_seq ,GT_info$gRNA_iBAR)]
+sce_knownGT$consequence[sce_knownGT$edited&(!(sce_knownGT$any_homozygous))] <- "het"
+
+sce_knownGT$predicted_consequence <- GT_info$predicted_consequence[match(sce_knownGT$gRNA_iBAR_seq ,GT_info$gRNA_iBAR)]# consequences for 
+#predicted rather than actual edit, for comparison
+sce_knownGT$predicted_consequence[sce_knownGT$predicted_consequence %in% c(NA,"not predicted")] <- "WT" #setting predicted consequence of non-JAK1 targeting 
+#gRNAs and gRNAs without a predicted edit to WT
+```
+
+```{r }
+sce_knownGT$GT <- GT_info$GT[match(sce_knownGT$gRNA_iBAR_seq,GT_info$gRNA_iBAR)]
+
+```
+
+
+```{r umap_consequence}
+colours_consequence <-  c("stop codon"="darkred","missense"="red","splice variant"="orange","promoter"="yellow","UTR"="purple","het"="darkblue","WT"="#000000","intron"="green","synonymous"="#ADD8E6")
+
+for (j in 1:length(unique(sce_knownGT$consequence))){
+  sce_temp <- cbind(sce_knownGT[,sce_knownGT$consequence!=unique(sce_knownGT$consequence)[j]],
+                   sce_knownGT[,sce_knownGT$consequence==unique(sce_knownGT$consequence)[j]] )
+sce_temp$consequence[sce_temp$consequence!=unique(sce_knownGT$consequence)[j]] <- NA
+print(plotReducedDim(sce_temp,colour_by = "consequence",dimred="UMAP") +
+  scale_color_manual(values=colours_consequence,na.value="lightgrey")+
+  labs(color="consequence")  + theme_classic(base_size=16)+ theme(legend.position = "bottom")+guides(color=guide_legend(nrow=2)))
+}
+
+```
+# Distribution of barcodes across clusters 
+
+We compute the distribution of barcodes and consequences across the LoF and the not LoF cluster. 
+
+
+```{r}
+GT_info$cluster <- NA
+df_cluster_iBAR <- data.frame(gRNA_iBAR=sce_knownGT$gRNA_iBAR_seq,cluster=sce_knownGT$cluster)
+df_cluster_iBAR_count <- df_cluster_iBAR %>% dplyr::group_by_all() %>% dplyr::count()
+df_cluster_iBAR_count$cluster_with_cell_number <- paste0(df_cluster_iBAR_count$cluster,"(",df_cluster_iBAR_count$n,")")
+for (j in 1:length(unique(df_cluster_iBAR_count$gRNA_iBAR))){
+  temp <- df_cluster_iBAR_count$cluster_with_cell_number[df_cluster_iBAR_count$gRNA_iBAR==unique(df_cluster_iBAR_count$gRNA_iBAR)[j]]
+  v <- temp
+  if (length(temp) > 1){
+    v <- temp[1]
+    for (k in 2:length(temp)){
+      v <- paste0(v,";",temp[k])
+    }
+  }
+  GT_info$cluster[GT_info$gRNA_iBAR==unique(df_cluster_iBAR_count$gRNA_iBAR)[j]] <- v
+}
+GT_info
+
+```
+
+We remove cells for in clusters where for a particular barcode the cells make up at most 10% of the cells or 1 cell. 
+
+```{r}
+df_cluster_iBAR_count$freq <- NA
+for (j in 1:length(unique(df_cluster_iBAR_count$gRNA_iBAR))){
+  aa <- df_cluster_iBAR_count$gRNA_iBAR==unique(df_cluster_iBAR_count$gRNA_iBAR)[j]
+  xx <- df_cluster_iBAR_count[aa,]
+  freq <- xx$n/sum(xx$n)
+  df_cluster_iBAR_count$freq[aa] <- freq 
+}
+df_cluster_iBAR_count <- df_cluster_iBAR_count[df_cluster_iBAR_count$freq>0.1,]
+df_cluster_iBAR_count <- df_cluster_iBAR_count[df_cluster_iBAR_count$n>1,]
+
+for (j in 1:length(unique(df_cluster_iBAR_count$gRNA_iBAR))){
+  temp <- df_cluster_iBAR_count$cluster_with_cell_number[df_cluster_iBAR_count$gRNA_iBAR==unique(df_cluster_iBAR_count$gRNA_iBAR)[j]]
+  v <- temp
+  if (length(temp) > 1){
+    v <- temp[1]
+    for (k in 2:length(temp)){
+      v <- paste0(v,";",temp[k])
+    }
+  }
+  GT_info$cluster[GT_info$gRNA_iBAR==unique(df_cluster_iBAR_count$gRNA_iBAR)[j]] <- v
+}
+GT_info
+```
+
+We plot the distribution of the different possible consequences across the two clusters. 
+
+```{r cluster_consequence_filtered}
+
+iBAR_cluster_combinations_keep <- paste0(df_cluster_iBAR_count$gRNA_iBAR,"-",df_cluster_iBAR_count$cluster)
+sce_knownGT$gRNA_iBAR_cluster <- paste0(sce_knownGT$gRNA_iBAR_seq,"-",sce_knownGT$cluster)
+
+sce_temp <- sce_knownGT[,sce_knownGT$gRNA_iBAR_cluster%in%iBAR_cluster_combinations_keep]
+
+print(ggplot(mapping=aes(x=sce_temp$cluster,fill=sce_temp$consequence)) +geom_bar(aes( y=..count../tapply(..count.., ..x.. ,sum)[..x..])) +
+     ylab("") +labs(fill="") + xlab("cluster") + theme_bw(base_size=15)+ggtitle("Consequence (VEP, based on actual edit)")+
+  scale_fill_manual(values=colours_consequence) + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 4)))
+
+```
+
+Repeating the above plot with predicted consequence instead of consequence
+
+```{r predicted_cluster_consequence_filtered}
+
+print(ggplot(mapping=aes(x=sce_temp$cluster,fill=sce_temp$predicted_consequence)) +geom_bar(aes( y=..count../tapply(..count.., ..x.. ,sum)[..x..])) +
+     ylab("") +labs(fill="") + xlab("cluster") + theme_bw(base_size=15)+ggtitle("Consequence (VEP, based on prediction)")+
+  scale_fill_manual(values=colours_consequence) + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 4)))
+
+```
+We compare the distribution of actual and predicted consequences across clusters.
+
+```{r}
+levels <- unique(c(sce_temp$predicted_consequence,sce_temp$consequence))
+predicted_LoF <- table(factor(sce_temp$predicted_consequence[sce_temp$cluster=="LoF"],levels=levels))
+predicted_not_LoF <- table(factor(sce_temp$predicted_consequence[sce_temp$cluster=="not_LoF"],levels=levels))
+called_LoF <- table(factor(sce_temp$consequence[sce_temp$cluster=="LoF"],levels=levels))
+called_not_LoF <- table(factor(sce_temp$consequence[sce_temp$cluster=="not_LoF"],levels=levels))
+```
+
+Comparing distribution of actual versus predicted consequences in the not LoF cluster. 
+
+```{r}
+table_Fisher <- rbind(predicted_not_LoF,called_not_LoF)
+fisher.test(table_Fisher,simulate.p.value=TRUE,B=100000)
+chisq.test(table_Fisher)
+```
+Comparing distribution of actual versus predicted consequences in the LoF cluster.
+
+```{r}
+table_Fisher <- rbind(predicted_LoF,called_LoF)
+fisher.test(table_Fisher,simulate.p.value=TRUE,B=100000)
+chisq.test(table_Fisher)
+```
+
+Comparing the overall distribution of predicted versus actual consequence. 
+
+```{r}
+table_Fisher <- rbind(predicted_LoF+predicted_not_LoF,called_LoF+called_not_LoF)
+fisher.test(table_Fisher,simulate.p.value=TRUE,B=100000)
+chisq.test(table_Fisher)
+```
+
+# Differential expression compared to cells with non-targeting gRNA and WT phenotype
+
+```{r}
+WT_genotypes <- GT_info$gRNA_iBAR[GT_info$GT == "WT" & GT_info$gene==""]
+sce_knownGT$gRNA_iBAR_vs_NT <- sce_knownGT$gRNA_iBAR_seq
+sce_knownGT$gRNA_iBAR_vs_NT[sce_knownGT$gRNA_iBAR_seq%in%WT_genotypes] <- "NT"
+```
+
+Differential expression compared to NT-WT cells for barcodes with at least 10 cells. 
+Each of the barcodes is compared to each NT-WT barcode with at least 10 cells, and median AUC and p-values are reported.
+
+```{r}
+barcodes_tested <- setdiff(names(table(sce_knownGT$gRNA_iBAR_vs_NT))[table(sce_knownGT$gRNA_iBAR_vs_NT) >= 10],"NT")
+sce_NT <- sce_knownGT[,sce_knownGT$gRNA_iBAR_vs_NT%in%c("NT")]
+NT_barcodes_keep <- names(table(sce_NT$gRNA_iBAR_seq))[table(sce_NT$gRNA_iBAR_seq)>=10]
+```
+
+```{r,eval=FALSE}
+markers <- list()
+sce_markers <- sce_knownGT[,sce_knownGT$gRNA_iBAR_seq%in%c(barcodes_tested,NT_barcodes_keep)]
+for (j in 1:length(barcodes_tested )){
+  sce_temp <- sce_markers[,sce_markers$gRNA_iBAR_vs_NT%in%c("NT",barcodes_tested[j])]
+  temp <- findMarkers(sce_temp,groups=sce_temp$gRNA_iBAR_seq,test.type="wilcox")
+  temp <- temp[[barcodes_tested[j]]]
+  temp <- temp[,3:4]
+  temp$barcode <- barcodes_tested[j]
+  temp$DE_gene_name <- rowData(sce)$V2[match(rownames(temp),rownames(sce))]
+  temp$DE_gene <- rownames(temp)
+  markers[[j]] <- temp[order(rownames(temp)),]
+}
+FDRs <- lapply(markers,function(x) x$FDR)
+FDRs <- do.call(cbind,FDRs)
+FDRs <- apply(FDRs,1,p.adjust)
+for (j in 1:length(markers)){
+  markers[[j]]$FDR <- FDRs[j,]
+}
+markers <- do.call(rbind,markers)
+write.table(markers[markers$FDR<0.1,],file=markers_file,sep=",",col.names = TRUE,row.names=FALSE)
+write.table(markers,file=markers_file_all,sep=",",col.names = TRUE,row.names=FALSE)
+```
+
+## Identifying a group of impacted genes 
+
+Finding a basis of genes: genes that are differentially expressed for any of the gRNAs + JAK-STAT pathway genes for at least one barcode. 
+
+```{r }
+markers <- read.table(markers_file,sep=",",header=TRUE)
+JAK_STAT_genes <- read.table("../JAK_STAT_pathway_genes.txt",sep=",")$V1
+JAK_STAT_genes <- features$V1[match(JAK_STAT_genes,features$V2)]
+markers <-  read.table(markers_file,sep=",",header=TRUE)
+basis_of_genes <- unique(c(JAK_STAT_genes,markers$DE_gene))
+```
+
+
+## PCA
+
+PCA based on the genes found above. 
+
+```{r }
+reducedDims(sce_knownGT)$PCA_basis_scaled <- calculatePCA(sce_knownGT[rowData(sce_knownGT)$V1%in%basis_of_genes,],ncomponents=50,scale=TRUE)
+```
+
+# Correlation between DE expression across barcodes
+
+We compute the pairwise correlation between the AUC vectors for comparison to WT-nontargeting (one number per gene in the vector) for each pair of barcodes. 
+
+```{r heatmap_cor_effect,fig.width=15,fig.height=15}
+markers <- read.csv(markers_file_all,header=TRUE,sep=",")
+markers_barcodes <- unique(markers$barcode)
+cor_effect <- matrix(0,nrow=length(markers_barcodes),ncol=length(markers_barcodes))
+rownames(cor_effect) <- markers_barcodes
+colnames(cor_effect) <- markers_barcodes
+for (j in 2:length(markers_barcodes)){
+  for (k in 1:(j-1)){
+    cor_effect[j,k] <- cor(markers$summary.AUC[markers$barcode== markers_barcodes[k]],
+    markers$summary.AUC[markers$barcode== markers_barcodes[j]])
+  }
+}
+cor_effect <- cor_effect+t(cor_effect)
+for (j in 1:nrow(cor_effect)){
+  cor_effect[j,j] <- 1
+}
+
+gene=GT_info$gene[match(colnames(cor_effect),GT_info$gRNA_iBAR)]
+gene[!(gene%in%c("JAK1"))] <- "other"
+edited <- rep("het",ncol(cor_effect))
+edited[GT_info$any_homozygous[match(colnames(cor_effect),GT_info$gRNA_iBAR)]] <- "hom"
+edited[GT_info$GT[match(colnames(cor_effect),GT_info$gRNA_iBAR)]=="WT"] <- "WT"
+df_row_cor <- data.frame(edited=edited,predicted_consequence=GT_info$predicted_consequence[match(colnames(cor_effect),GT_info$gRNA_iBAR)],
+                     consequence=GT_info$worst_consequence[match(colnames(cor_effect),GT_info$gRNA_iBAR)],
+                     z_score=GT_info$zscore_facs_edited[match(colnames(cor_effect),GT_info$gRNA_iBAR)],
+                     gene=gene)
+df_row_cor$z_score <- as.double(df_row_cor$z_score)
+df_row_cor$z_score_binned <- ""
+df_row_cor$z_score_binned[df_row_cor$z_score >= -2 & df_row_cor$z_score < -1] <- "[-2,-1)"
+df_row_cor$z_score_binned[df_row_cor$z_score >= -1 & df_row_cor$z_score < 1] <- "[-1,1)"
+df_row_cor$z_score_binned[df_row_cor$z_score >= 1 & df_row_cor$z_score < 2] <- "[1,2)"
+df_row_cor$z_score_binned[df_row_cor$z_score >= 2 & df_row_cor$z_score < 3] <- "[2,3)"
+df_row_cor$z_score_binned[df_row_cor$z_score >= 3] <- "[3,Inf)"
+df_row_cor$z_score_binned <- factor(df_row_cor$z_score_binned,levels=c("[-2,-1)","[-1,1)","[1,2)","[2,3)","[3,Inf)"))
+rownames(df_row_cor) <- colnames(cor_effect)
+df_row_cor$predicted_consequence[is.na(df_row_cor$predicted_consequence)] <- "WT"
+df_row_cor$predicted_consequence[df_row_cor$predicted_consequence=="not predicted"] <- "WT"# cells with a gRNA not targeting JAK1
+my_colour = list(
+    consequence = colours_consequence,
+    predicted_consequence=c(colours_consequence,"not predicted"="white"),
+    z_score_binned = c("[-2,-1)"="darkred","[-1,1)"="purple","[1,2)"="blue","[2,3)"="darkblue","[3,Inf)"="black","NA"="grey"),
+    gene=c("other"="grey","JAK1"="darkblue"),edited=c("WT"="blue","het"="purple","hom"="red")
+)
+
+cor_heatmap <- pheatmap(cor_effect,show_rownames=FALSE,show_colnames=FALSE,annotation_row = df_row_cor,annotation_colors = my_colour,cellwidth = 3,cellheight = 3,treeheight_row=0,treeheight_col=0)
+
+```
+
+# Diffusion score measures LoF progression
+
+We use diffusion maps (Haghverdi et al., Nat. Methods, 2016; Coifman and Lafon, Applied and Computational Harmonic Analysis, 2006) to further quantify the relative impact of different mutations. z-scores and consequence is strongly associated with the first diffusion component (referred to as diffusion_score).
+
+```{r}
+dm <- DiffusionMap(reducedDims(sce_knownGT)$PCA_basis_scaled)
+if (cor(eigenvectors(dm)[,1],sce_knownGT$facs_z_score_edited,use = "complete.obs") < 0){
+  eigenvectors(dm)[,1] <- -eigenvectors(dm)[,1]
+}
+
+xx <- sample(1:length(dm$DC1))
+tmp <- data.frame(DC1 = eigenvectors(dm)[xx, 1],
+                  DC2 = eigenvectors(dm)[xx, 2],
+                  zscore_facs = sce_knownGT$facs_z_score_edited[xx],
+                  zscore_proliferation = sce_knownGT$prolif_z_score_edited[xx],
+                  consequence = sce_knownGT$consequence[xx])
+p1 <- ggplot(tmp, aes(x = DC1, y = DC2, colour = zscore_facs)) +
+  geom_point() + 
+  xlab("Diffusion component 1") + 
+  ylab("Diffusion component 2") +
+  theme_classic(base_size=11) + theme(legend.position = "bottom",legend.box="vertical",legend.margin=margin())+
+  labs(color="")+ guides(color = guide_legend(nrow=2,override.aes = list(size = 3)))+ scale_color_viridis_c()
+print(p1)
+  
+p2 <- ggplot(tmp, aes(x = DC1, y = DC2, colour = consequence)) +
+  geom_point(alpha=1,size=0.7) + 
+  xlab("Diffusion component 1") + 
+  ylab("Diffusion component 2") +
+  theme_classic(base_size=11) +scale_color_colorblind(na.value="grey")+ theme(legend.position = "bottom",legend.box="vertical",legend.margin=margin())+
+  labs(color="")+ guides(color = guide_legend(override.aes = list(size = 3)))
+print(p2)
+
+p3 <- ggplot(tmp, aes(x = DC1, y = DC2, colour = zscore_proliferation)) +
+  geom_point() + 
+  xlab("Diffusion component 1") + 
+  ylab("Diffusion component 2") +
+  theme_classic(base_size=11) + theme(legend.position = "bottom",legend.box="vertical",legend.margin=margin())+
+  labs(color="")+ guides(color = guide_legend(nrow=2,override.aes = list(size = 3)))+ scale_color_viridis_c()
+print(p3)
+```
+
+Diffusion map coloured by diffusion score
+
+```{r diffusion_map_first_figure}
+p1 <- ggplot(tmp, aes(x = DC1, y = DC2, colour = DC1)) +
+  geom_point() + 
+  xlab("Diffusion component 1") + 
+  ylab("Diffusion component 2") +
+  theme_classic(base_size=11) + theme(legend.position = "bottom")+
+  labs(color="")+scale_colour_viridis_c(option="magma")
+print(p1)
+```
+
+
+
+The following figure illustrates the distribution of diffusion_score across all cells with a known mutation, coloured by the consequence of the mutation. 
+
+```{r diffusion_score_clusters}
+sce_knownGT$DC1 <- eigenvectors(dm)[,1]
+ggplot(mapping=aes(x=sce_knownGT$DC1,color=sce_knownGT$consequence)) + geom_density(size=1)+theme_bw()+scale_color_manual(values=colours_consequence)+xlab("diffusion_score")
+```
+
+
+Adding diffusion_score to the genotype metadata
+
+```{r}
+GT_info$diffusion_score <- NA
+for (j in 1:length(unique(GT_info$gRNA_iBAR))){
+  GT_info$diffusion_score[GT_info$gRNA_iBAR==unique(GT_info$gRNA_iBAR)[j]] <- mean(sce_knownGT$DC1[sce_knownGT$gRNA_iBAR_seq==unique(GT_info$gRNA_iBAR)[j]])
+}
+```
+
+# Differential expression along pseudotime
+
+The following plot illustrates genes from the JAK-STAT pathway correlated with the diffusion score. 
+
+```{r DE_diffusion_score}
+JAK_STAT_pathway_genes <- read.table("../JAK_STAT_pathway_genes.txt")$V1
+JAK_STAT_pathway_genes <- features$V1[match(JAK_STAT_pathway_genes,features$V2)]
+JAK_STAT_pathway_genes <- intersect(JAK_STAT_pathway_genes,rownames(sce_knownGT))
+JAK_STAT_pathway_genes <- JAK_STAT_pathway_genes[apply(logcounts(sce_knownGT[JAK_STAT_pathway_genes,]),1,sd) > 0.01]
+ 
+cor_diffusion_score_JAK_STAT <- apply(logcounts(sce_knownGT[JAK_STAT_pathway_genes,]),1,function(x) {y <- cor.test(x,sce_knownGT$DC1);
+return(c(y$estimate,y$p.value))})
+cor_diffusion_score_JAK_STAT  <- as.data.frame(t(cor_diffusion_score_JAK_STAT))
+colnames(cor_diffusion_score_JAK_STAT) <- c('cor','p.value')
+cor_diffusion_score_JAK_STAT$FDR <- p.adjust(cor_diffusion_score_JAK_STAT$p.value)
+
+cor_diffusion_score_JAK_STAT$gene_name <- features$V2[match(rownames(cor_diffusion_score_JAK_STAT),features$V1)]
+df <- as.data.frame(cor_diffusion_score_JAK_STAT)
+ggplot(df, aes(x=cor, y=-log10(FDR))) +
+    geom_point(aes(color="grey", size=1, alpha=0.4)) +
+    ggtitle('Volcano Plot - JAK-STAT pathway') +
+    labs(y=expression('-Log'[10]*' FDR'), x=expression('cor')) +
+    theme_classic(base_size=20) +
+    theme(legend.position="none", plot.title = element_text(size = rel(1), hjust = 0.5))+
+    geom_text_repel(data=df[df$FDR<0.1,],aes(x = cor, y = -log10(FDR),label=gene_name),max.overlaps=100)+
+    geom_point(data=df[df$FDR<0.1,],aes(x = cor, y = -log10(FDR),color="red", size=1,alpha=0.4))+
+    scale_color_manual(values=c('gray','red'))+ scale_y_continuous(trans=scales::pseudo_log_trans(sigma=1,base = 1.05))+
+  geom_vline(xintercept = 0)+geom_hline(yintercept = 1)
+
+```
+
+# Missense barcodes
+
+A more detailed analysis of missense barcodes and separation of function variants. 
+
+```{r cor_missense_stop}
+barcodes_missense <- GT_info$gRNA_iBAR[GT_info$worst_consequence=="missense"]
+barcodes_missense <- barcodes_missense[!(is.na(barcodes_missense))]
+```
+
+Which genes become DE/more DE for missense mutations as a function of increasing diffusion_score?
+
+```{r heatmap_missense_range,fig.height=25,fig.width=15}
+barcodes_missense <- barcodes_missense[!(is.na(GT_info$diffusion_score[match(barcodes_missense,GT_info$gRNA_iBAR)]))]
+barcodes_missense <- intersect(barcodes_missense,unique(sce_knownGT$gRNA_iBAR_seq))
+sce_missense <- sce_knownGT[,sce_knownGT$gRNA_iBAR_seq%in% barcodes_missense]
+#average across barcode
+logcounts_missense_per_barcode <- matrix(nrow=nrow(sce_missense),ncol=length(barcodes_missense))
+rownames(logcounts_missense_per_barcode) <- rownames(sce_missense)
+colnames(logcounts_missense_per_barcode) <- barcodes_missense
+for (j in 1:length(barcodes_missense)){
+  logcounts_missense_per_barcode[,j] <- apply(logcounts(sce_missense[,sce_missense$gRNA_iBAR_seq==barcodes_missense[j]]),1,mean)
+}
+diffusion_score_missense <- GT_info$diffusion_score[match(colnames(logcounts_missense_per_barcode),GT_info$gRNA_iBAR)]
+names(diffusion_score_missense) <- colnames(logcounts_missense_per_barcode)
+logcounts_missense_per_barcode <- logcounts_missense_per_barcode[apply(logcounts_missense_per_barcode,1,function(x) sd(x,na.rm=TRUE)) > 0.01,]
+cor_missense_diffusion_score <- apply(logcounts_missense_per_barcode,1,function(x) {y <- cor.test(x,diffusion_score_missense);
+return(c(y$estimate,y$p.value))})
+cor_missense_diffusion_score <- as.data.frame(t(cor_missense_diffusion_score))
+colnames(cor_missense_diffusion_score) <- c('cor','p.value')
+cor_missense_diffusion_score$FDR <- p.adjust(cor_missense_diffusion_score$p.value)
+cor_missense_diffusion_score <- cor_missense_diffusion_score[cor_missense_diffusion_score$FDR<0.1,]
+logcounts_missense_per_barcode <- logcounts_missense_per_barcode[rownames(cor_missense_diffusion_score),]
+rownames(logcounts_missense_per_barcode) <- rowData(sce_missense)$V2[match(rownames(logcounts_missense_per_barcode),rowData(sce_missense)$V1)]
+df_col_pseudo <- data.frame(diffusion_score=diffusion_score_missense)
+rownames(df_col_pseudo) <- colnames(logcounts_missense_per_barcode)
+logcounts_missense_per_barcode_scaled <- apply(logcounts_missense_per_barcode,1,function(x) return((x-mean(x))/sd(x)))
+colnames(logcounts_missense_per_barcode_scaled) <- rownames(logcounts_missense_per_barcode)
+heatmap_dynamic_missense <- pheatmap(t(logcounts_missense_per_barcode_scaled[order(diffusion_score_missense),]),cluster_rows=TRUE,cluster_cols=FALSE,annotation_col=df_col_pseudo[order(diffusion_score_missense),,drop=F],treeheight_row = 0,show_rownames=FALSE,show_colnames=FALSE,cellwidth = 10,cellheight = 1)
+
+```
+
+Extract clusters of genes with similar dynamics across diffusion_score for missense mutations
+
+```{r}
+a <- cutree(heatmap_dynamic_missense$tree_row,2)
+write.table(names(a)[a==1],col.names=FALSE,row.names=FALSE,file="genes_missense_diffusion_score_group_1.csv",sep=",")
+write.table(names(a)[a==2],col.names=FALSE,row.names=FALSE,file="genes_missense_diffusion_score_group_2.csv",sep=",")
+```
+
+# Separation of function (SOF variants)
+
+Diffusion scores and FACS z-scores on barcode-basis - marking barcodes with intermediate diffusion scores
+
+
+```{r diffusion_prolif}
+GT_info$proliferation_z_score_edited <- GT_info$zscore_proliferation
+GT_info$proliferation_z_score_edited[!(GT_info$any_homozygous)] <- NA
+df <- data.frame(GT=GT_info$GT_hom,FACS_score=GT_info$zscore_facs_edited,proliferation_score=GT_info$proliferation_z_score_edited,diffusion_score=GT_info$diffusion_score)
+df <- df[complete.cases(df),]
+
+fit <- lm(FACS_score~proliferation_score,df)
+
+df_residuals_diffusion <- data.frame(FACS_versus_proliferation_score=fit$residuals,
+          diffusion_score=df$diffusion_score,GT=df$GT)
+df_residuals_diffusion$gRNA_iBAR <- GT_info$gRNA_iBAR[match(rownames(df_residuals_diffusion),GT_info$puroBC)]
+df_residuals_diffusion$mid_diffusion_score <-  df_residuals_diffusion$diffusion_score > 0 &
+  df_residuals_diffusion$diffusion_score < 0.012
+GTs_highlight <- unique(df_residuals_diffusion$GT[df_residuals_diffusion$mid_diffusion_score])
+xx <- df_residuals_diffusion$GT %in% GTs_highlight
+df_residuals_diffusion$highlight <- xx
+
+
+ggplot(df_residuals_diffusion,mapping=aes(x=FACS_versus_proliferation_score,fill=highlight)) + geom_histogram() + theme_classic() + scale_fill_manual(values=c("FALSE"="grey","TRUE"="purple")) 
+
+ggplot(df_residuals_diffusion,mapping=aes(x=FACS_versus_proliferation_score,y=diffusion_score,color=FACS_versus_proliferation_score)) + geom_point(size=3)+theme_classic()+scale_color_viridis_c()+ theme(legend.position = "bottom")+
+  geom_text_repel(data=df_residuals_diffusion[xx,],aes(x = FACS_versus_proliferation_score, y = diffusion_score,label=GT),max.overlaps=100,size=2) + geom_hline(yintercept=0) + geom_hline(yintercept=0.012)
+
+p1 <- ggplot(df, aes(y = FACS_score, x = proliferation_score, color = diffusion_score)) +
+  geom_point(size=3,position=position_jitter(width=1,height=1)) + 
+  xlab("proliferation score") + 
+  ylab("FACS score") +
+  theme_classic(base_size=11) + theme(legend.position = "bottom",legend.box="vertical",legend.margin=margin())+
+  labs(color="")+ scale_color_viridis_c(option="magma") + geom_smooth(method="lm",se=FALSE)+geom_text_repel(data=df[xx,],aes(x = proliferation_score, y = FACS_score,label=GT),max.overlaps=100,size=1)
+print(p1)
+```
+
+Distribution of diffusion_score for missense barcodes.
+
+```{r distribution_diffusion_score_missense,fig.width=3,fig.height=7}
+sce_missense <- sce_knownGT[,sce_knownGT$gRNA_iBAR_seq %in% df_residuals_diffusion$gRNA_iBAR]
+levels_a <- df_residuals_diffusion$gRNA_iBAR[order(df_residuals_diffusion$diffusion_score,decreasing=TRUE)]
+levels_a <- levels_a[levels_a%in%names(table(sce_missense$gRNA_iBAR_seq))[table(sce_missense$gRNA_iBAR_seq)>=3]]
+df <- data.frame(diffusion_score=sce_missense$DC1,barcode=factor(sce_missense$gRNA_iBAR_seq,
+              levels=levels_a))
+df <- df[df$barcode%in%levels_a,]
+df$GT <- GT_info$GT_hom[match(df$barcode,GT_info$gRNA_iBAR)]
+df$highlight <- df$GT %in% GTs_highlight
+ggplot(df,mapping=aes(x=diffusion_score,y=barcode,fill=highlight)) + geom_density_ridges() + scale_fill_manual(values=c("FALSE"="grey","TRUE"="darkred"))+theme_minimal()+theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank())
+```
+
+Colouring the distribution by FACS z-score. 
+
+```{r distribution_diffusion_facs,fig.width=3,fig.height=7}
+df <- data.frame(diffusion_score=sce_missense$DC1,barcode=factor(sce_missense$gRNA_iBAR_seq,
+              levels=levels_a),facs=sce_missense$facs_z_score_edited,prolif=sce_missense$prolif_z_score_edited)
+df <- df[df$barcode%in%levels_a,]
+df$GT <- GT_info$GT_hom[match(df$barcode,GT_info$gRNA_iBAR)]
+ggplot(df,mapping=aes(x=diffusion_score,y=barcode,fill=facs)) + geom_density_ridges() +theme_minimal()+theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank()) + scale_fill_viridis_c(option="turbo")
+```
+
+Colouring by proliferation z-score
+
+```{r distribution_diffusion_prolif,fig.width=3,fig.height=7}
+ggplot(df,mapping=aes(x=diffusion_score,y=barcode,fill=prolif)) + geom_density_ridges() +theme_minimal()+theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank()) + scale_fill_viridis_c(option="turbo")
+```
+
+## Differential expression between separation of function mutants and missense mutations with high diffusion score
+
+Identifying genes that are upregulated in SOF variants compared to variants with high diffusion score and not downregulated in SOF compared to bening mutations; or downregulated in SOF variants compared to variants with high diffusion and not upregulated compared to benign mutations. 
+
+```{r DE_benign_versus_SOF,fig.width=6,fig.height=14}
+group <- rep("full_effect",ncol(sce_missense))
+group[sce_missense$GT%in%GTs_highlight] <- "SOF"
+group[sce_missense$DC1 < 0] <- "benign"
+group_SOF_versus_full <- group[group!="benign"]
+markers_SOF_versus_full <- findMarkers(sce_missense[,group!="benign"],group=group_SOF_versus_full,test.type="wilcox",pval.type="any")[["SOF"]]
+markers_SOF_versus_full$gene_name <- features$V2[match(rownames(markers_SOF_versus_full),features$V1)]
+markers_SOF_versus_full <- as.data.frame(markers_SOF_versus_full)
+
+group_SOF_versus_benign <- group[group!="full_effect"]
+markers_SOF_versus_benign <- findMarkers(sce_missense[,group!="full_effect"],group=group_SOF_versus_benign,test.type="wilcox",pval.type="any")[["SOF"]]
+markers_SOF_versus_benign$gene_name <- features$V2[match(rownames(markers_SOF_versus_benign),features$V1)]
+markers_SOF_versus_benign <- as.data.frame(markers_SOF_versus_benign)
+
+markers_SOF_versus_benign <- markers_SOF_versus_benign[rownames(markers_SOF_versus_full),]
+markers_both <- cbind(markers_SOF_versus_benign[,c(3,5)],markers_SOF_versus_full[,c(3,5,6)])
+colnames(markers_both) <- c("FDR.bening","AUC.benign","FDR.full_effect","AUC.full_effect","gene_name")
+
+markers_both$sig <- markers_both$FDR.full_effect<0.1
+markers_both$sig[markers_both$AUC.benign < 0.45 & markers_both$AUC.full_effect > 0.5] <- FALSE
+markers_both$sig[markers_both$AUC.benign > 0.55 & markers_both$AUC.full_effect < 0.5] <- FALSE
+
+ggplot(markers_both,aes(x=AUC.benign,y=AUC.full_effect,color=sig)) + geom_hline(yintercept=0.5)+
+  geom_vline(xintercept=0.5)+geom_point() + theme_classic()+
+    theme(legend.position="none", plot.title = element_text(size = rel(1), hjust = 0.5))+
+geom_text_repel(data=markers_both[markers_both$sig,],
+aes(x = AUC.benign, y = AUC.full_effect,label=gene_name),max.overlaps=100)+scale_color_manual(values=c("FALSE"="grey","TRUE"="darkred"))
+                
+  
+
+
+```
+
+
+# gRNAs with several genotypes
+
+
+
+Plotting gRNAs with several puro-barcodes
+
+```{r gRNAs_several_puro}
+gRNAs_with_several_iBARs <- unique(GT_info$gRNA[duplicated(GT_info$gRNA)])
+GT_info[GT_info$gRNA%in% gRNAs_with_several_iBARs,]
+```
+
+How many gRNAs with several iBARs have iBAR-clones with different genotypes?
+
+```{r}
+gRNAs_with_different_GTs <- c()
+for (j in 1:length(gRNAs_with_several_iBARs)){
+  GTs <- unique(GT_info$GT[GT_info$gRNA%in%gRNAs_with_several_iBARs[j]])
+  if (length(GTs) >1){
+    gRNAs_with_different_GTs  <- c(gRNAs_with_different_GTs,gRNAs_with_several_iBARs[j])
+  }
+}
+```
+
+Diffusion score plots for gRNAs with iBAR-clones with different genotypes
+
+```{r gRNA_with_several_GTs}
+for (j in 1:length(gRNAs_with_different_GTs)){
+  sce_temp <- sce_knownGT[,sce_knownGT$gRNA%in%gRNAs_with_different_GTs[j]]
+  df <- data.frame(GT=as.factor(sce_temp$GT),diffusion_score=sce_temp$DC1)
+
+print(ggplot(df,aes(x=diffusion_score,fill=GT)) + geom_density(alpha=0.3)+scale_fill_colorblind()+ theme(legend.position = "bottom") + theme_classic()+ theme(legend.position = "bottom")+guides(fill=guide_legend(ncol=1)))
+}
+```
+
+
+# Pathway analysis with PROGENy
+
+M Schubert et al. 2018. Perturbation-Response Genes Reveal Signaling Footprints in Cancer Gene Expression. Nature Communications.
+Holland CH et al. 2020. Robustness and applicability of transcription factor and pathway analysis tools on
+  single-cell RNA-seq data. Genome Biology. 
+  
+The plots below illustrate the strong correlation between the diffusion score and the PROGENy JAK-STAT pathway score. 
+
+```{r progeny}
+library(progeny)
+# adding logcounts of cell-cycle related genes
+# merged_sce_all <- readRDS("merged_sce_MB_before_gRNA_assignment.rds")
+# merged_sce <- merged_sce_all[,colnames(sce_knownGT)]
+logcounts_sce_knownGT <- logcounts(sce_knownGT)
+rownames(logcounts_sce_knownGT) <- rowData(sce_knownGT)$V2
+progeny_no_cc <- progeny(as.matrix(logcounts_sce_knownGT))
+progeny_no_cc <- as.data.frame(progeny_no_cc)
+progeny_no_cc$diffusion_score <- sce_knownGT$DC1
+colnames(progeny_no_cc) <- sapply(colnames(progeny_no_cc),function(x) gsub("-","_",x))
+ggplot(progeny_no_cc,mapping=aes(x=diffusion_score,y=JAK_STAT)) + geom_point()
+```
+
+Averaging PROGENy scores across barcodes - each dot in the plot below is a barcode coloured by its mutational consequence
+
+```{r progeny_diffusion}
+GT_info$progeny_score <- NA
+for (j in 1:length(unique(GT_info$gRNA_iBAR))){
+  GT_info$progeny_score[GT_info$gRNA_iBAR==unique(GT_info$gRNA_iBAR)[j]] <- mean(progeny_no_cc$JAK_STAT[sce_knownGT$gRNA_iBAR_seq==unique(GT_info$gRNA_iBAR)[j]])
+}
+
+GT_info$worst_consequence[GT_info$GT=="WT"] <- "WT"
+GT_info$worst_consequence[GT_info$GT!="WT" & (!(GT_info$any_homozygous))] <- "het"
+ggplot(GT_info,mapping=aes(x=diffusion_score,y=progeny_score,color=worst_consequence)) + geom_point(size=2) + theme_classic(base_size=16)+
+  scale_colour_manual(values=colours_consequence)
+
+```
+
+
+
+Saving the single-cell experiment.
+
+```{r}
+saveRDS(sce_knownGT,file=sce_file_output)
+saveRDS(GT_info,file=GT_file)
+write.table(GT_info,file=GT_file_csv,row.names=FALSE,col.names=TRUE,quote=FALSE)
+```

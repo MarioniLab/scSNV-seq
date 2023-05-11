@@ -1,0 +1,310 @@
+---
+title: "Numbers of barcodes with different properties"
+author: "Magdalena Strauss"
+output:
+  BiocStyle::html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes  
+---
+
+This script summaries our results on barcode level and compares predicted and actual editing. 
+
+```{r}
+library(ggplot2)
+library(pheatmap)
+# knitr::opts_chunk$set(
+#     echo = FALSE,
+#     message = FALSE,
+#     warning = FALSE,
+#     message = FALSE,
+#     cache=FALSE,
+#     dev = c("pdf"),
+#     dpi=300
+# )
+library(dplyr)
+GT_info <- readRDS("MissionBio/GT_barcode_metadata.rds")
+```
+
+Total number of confidently genotyped barcodes: `r nrow(GT_info)`.
+
+Number of confidently genotyped barcodes with scRNA-seq representation: `r sum(!(is.na(GT_info$diffusion_score)))`
+
+Number of unique genotypes: `r length(unique(GT_info$GT))`
+
+Number of unique genotypes with scRNA-seq representation: `r length(unique(GT_info$GT[!(is.na(GT_info$diffusion_score))]))`
+
+Number of gRNAs: `r length(unique(GT_info$gRNA))`
+
+Number of gRNAs with scRNA-seq representation:  `r length(unique(GT_info$gRNA[!(is.na(GT_info$diffusion_score))]))`
+
+# Differences between genotyped and expected edits
+
+Loading the predicted data (as in Coelho et al. (2023) Cancer Cell.)
+
+```{r}
+aa <- read.table("MissionBio/mutation_file_Coelho_2023.csv",sep=",",head=TRUE)
+GT_info$predicted_seq_edited <- aa$predicted_edit[match(GT_info$gRNA,aa$sgRNA_ID)]
+GT_info$gRNA_seq <- aa$guide[match(GT_info$gRNA,aa$sgRNA_ID)]
+```
+
+Comparing actual versus predicted consequences
+
+```{r}
+GT_info_sc_and_pool <- GT_info[GT_info$gRNA%in%aa$sgRNA_ID,]#gRNAs present for both experiments
+
+colours_consequence <-  c("stop codon"="darkred","missense"="red","splice variant"="orange","promoter"="yellow","UTR"="purple","het"="darkblue","WT"="#000000","intron"="green","synonymous"="#ADD8E6")
+GT_info_sc_and_pool$worst_consequence[GT_info_sc_and_pool$GT=="WT"] <- "WT"
+GT_info_sc_and_pool$worst_consequence[is.na(GT_info_sc_and_pool$worst_consequence)] <- "het"
+GT_info_sc_and_pool$worst_consequence[grepl("UTR",GT_info_sc_and_pool$worst_consequence)] <- "UTR"
+GT_info_sc_and_pool$predicted_consequence[!(grepl("t",GT_info_sc_and_pool$predicted_seq_edited))] <- "WT"
+
+GT_info_sc_and_pool <- GT_info_sc_and_pool[GT_info_sc_and_pool$gene=="JAK1",] #restricting to gRNAs targeting JAK1 or the promoter
+
+```
+
+
+```{r consequence_predicted_versus_actual}
+df_consequence <- data.frame(gRNA=GT_info_sc_and_pool$gRNA,consequence=GT_info_sc_and_pool$worst_consequence)
+consequence_count <- df_consequence %>% group_by_all() %>% dplyr::count()
+consequence_count$all_consequence <- NA
+for (j in 1:nrow(consequence_count)){
+  xx <- which(consequence_count$gRNA==consequence_count$gRNA[j])
+  consequence_count$all_consequence[j] <- consequence_count$consequence[xx[1]]
+  if (length(xx) >1){
+    for (k in 2:length(xx)){
+      consequence_count$all_consequence[j] <- paste0(consequence_count$all_consequence[j] ,"/",consequence_count$consequence[xx[k]])
+    }
+  }
+}
+df_consequence <- consequence_count[,c(1,4)]
+df_consequence <- distinct(df_consequence)
+df_consequence$predicted_consequence <- GT_info_sc_and_pool$predicted_consequence[match(df_consequence$gRNA,GT_info_sc_and_pool$gRNA)]
+```
+
+
+
+For each consequence, plot differences between predicted and actual consequence
+
+```{r predicted_versus_actual_ind}
+df_consequence_count <- df_consequence[,2:3] %>% group_by_all() %>% dplyr::count()
+colours_consequence_extended <- c(colours_consequence,"stop codon/synonymous" = "#CBC3E3","het/stop codon"="magenta",
+                                  "missense/WT" = "beige")
+for (j in 1:length(unique(df_consequence_count$predicted_consequence))){
+  df <- df_consequence_count[df_consequence_count$predicted_consequence == unique(df_consequence_count$predicted_consequence)[j],]
+ df_count <- data.frame(consequence_called = df$all_consequence,
+            percent=round(100*df$n/sum(df$n),0),number=df$n)
+  print(ggplot(df_count, aes(x="", y=percent, fill=consequence_called)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = number), position = position_stack(vjust = 0.5),color="white")+
+  scale_fill_manual(values=colours_consequence_extended)+ggtitle(paste0("predicted ",unique(df_consequence_count$predicted_consequence)[j]))+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+}
+```
+For all barcodes
+
+```{r predicted_versus_actual_all}
+ df_count <- data.frame(consequence_called = names(table(df_consequence[,2])),number=as.vector(table(df_consequence[,2])))
+  print(ggplot(df_count, aes(x="", y=number, fill=consequence_called)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = number),color="red", position = position_stack(vjust = 0.5))+
+  scale_fill_manual(values=colours_consequence_extended)+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+
+```
+
+
+# Checking false negatives and false positives 
+
+Plotting the distributions of diffusion scores of barcodes called as WT and barcodes called as stop codons. 
+
+Diffusion score distribution for all barcodes assigned the WT genotype. 
+
+```{r checking_FNR,fig.height=3}
+ggplot(mapping=aes(x=GT_info$diffusion_score[GT_info$GT=="WT"])) + geom_histogram() + theme_classic(base_size=16) + xlab("diffusion score")+
+  ylab("number of barcodes") + ggtitle("barcodes called as WT") + xlim(c(-0.005,0.02))
+
+```
+Diffusion score distribution for all barcodes assigned a stop codon genotype. 
+
+```{r checking_FDR,fig.height=3}
+ggplot(mapping=aes(x=GT_info$diffusion_score[GT_info$worst_consequence=="stop codon"])) + geom_histogram() + theme_classic(base_size=16) + xlab("diffusion score")+
+  ylab("number of barcodes") + ggtitle("barcodes called as stop codon") + xlim(c(-0.005,0.017))
+
+```
+non-targeting gRNAs
+
+```{r checking_FDR2}
+ggplot(mapping=aes(x=GT_info$diffusion_score[GT_info$gene==""])) + geom_histogram() + theme_classic(base_size=16) + xlab("diffusion score")+
+  ylab("number of barcodes") + ggtitle("nontargeting gRNAs") + xlim(c(-0.005,0.02))
+
+```
+
+
+Diffusion scores of barcodes called as WT, grouped by their predicted consequence
+
+```{r WT_not_predicted,fig.height=3,fig.width=11}
+temp <- GT_info[GT_info$GT == "WT" & GT_info$predicted_consequence!="WT",]
+df <- data.frame(diffusion_score=temp$diffusion_score,predicted_consequence=temp$predicted_consequence,
+                 zscore=temp$zscore_facs)
+df <- df[complete.cases(df),]
+ggplot(df,mapping=aes(x=predicted_consequence,y=zscore,color=diffusion_score)) + geom_jitter(size=3,width=0.25,height=0.002)+
+  ylab("z-score FACS \n(if edited as predicted)") + ggtitle("barcodes called WT\n predicted non-WT")+scale_colour_viridis_c(option="magma")+theme_classic()+xlab("predicted consequence") +geom_hline(yintercept = 1.96)+
+  geom_hline(yintercept=-1.96)
+```
+
+Diffusion scores of barcodes called as stop codons, grouped by predicted consequence. 
+
+```{r predicted_stop,fig.height=3,fig.width=6}
+temp <- GT_info[GT_info$predicted_consequence == "stop codon",]
+df <- data.frame(diffusion_score=temp$diffusion_score,consequence=temp$worst_consequence)
+ggplot(df,mapping=aes(x=consequence,y=diffusion_score,color=diffusion_score)) + geom_jitter(size=3,width=0.25,height=0.002)+
+  ylab("number of barcodes") + ggtitle("barcodes predicted \n stop codon GT")+scale_colour_viridis_c(option="magma")+theme_classic()+xlab("called genotype")
+
+```
+```{r predicted_splice,fig.height=3,fig.width=6}
+temp <- GT_info[GT_info$predicted_consequence == "splice variant",]
+df <- data.frame(diffusion_score=temp$diffusion_score,consequence=temp$worst_consequence)
+ggplot(df,mapping=aes(x=consequence,y=diffusion_score,color=diffusion_score)) + geom_jitter(size=3,width=0.25,height=0.002)+
+  ylab("number of barcodes") + ggtitle("barcodes predicted \n splice variant GT")+scale_colour_viridis_c(option="magma")+theme_classic()+xlab("called genotype")
+
+```
+#Number of barcodes per gRNA
+
+The following is a barplot of the number of barcodes per gRNA for the scDNA-experiment. 
+
+```{r, barocdes_per_gRNA}
+ggplot(mapping=aes(x=as.factor(c(table(GT_info$gRNA),table(GT_info$gRNA[!(is.na(GT_info$diffusion_score))]))),
+          fill=c(rep("DNA",length(table(GT_info$gRNA))),rep("DNA+RNA",length(table(GT_info$gRNA[!(is.na(GT_info$diffusion_score))])))))) + geom_histogram(position="dodge",stat="count") + theme_classic(base_size=16) +xlab("number of barcodes per gRNA")+
+  ylab("number of gRNAs")+labs(fill="") + scale_fill_manual(values=c("DNA"="blue","DNA+RNA"="magenta"))
+```
+
+# Comparing actual and predicted editing
+
+Is the actual editing exactly equal to the predicted editing? This analysis is on a per-barcode rather than per-gRNA level. 
+
+```{r actual_versus_predicted_editing}
+
+extract_hom_editing_positions <- function(v){
+  w <- strsplit(v,";")[[1]]
+  w_hom <- w[grepl("1/1/1",w)]
+  w_hom <- sapply(w_hom,function(x) strsplit(x,"[(]")[[1]][1])
+  w_hom <- sapply(w_hom,as.double)
+  return(w_hom)
+}
+
+hom_editing_positions <- sapply(GT_info_sc_and_pool$editing_positions,extract_hom_editing_positions)
+
+mark_edit_on_seq <- function(gRNA,editing_positions){
+  #input is the gRNA sequence and editing positions
+  #the function replaces C by t in the gRNA for each edited position
+  gRNA_edited <- gRNA
+    for (j in 1:length(editing_positions)){
+      substring(gRNA_edited,editing_positions[j],editing_positions[j])  <- "t"
+    }
+  return(gRNA_edited)
+}
+
+gRNAs_edited <- GT_info_sc_and_pool$gRNA_seq
+for (j in 1:nrow(GT_info_sc_and_pool)){
+  if (GT_info_sc_and_pool$any_homozygous[j]){
+     gRNAs_edited[j] <- mark_edit_on_seq(GT_info_sc_and_pool$gRNA_seq[j],hom_editing_positions[[j]])
+  }
+}
+
+GT_info_sc_and_pool$actual_edit_hom <- gRNAs_edited
+sum(GT_info_sc_and_pool$actual_edit_hom[!(is.na(GT_info_sc_and_pool$actual_edit_hom))]==GT_info_sc_and_pool$predicted_seq_edited[!(is.na(GT_info_sc_and_pool$actual_edit_hom))])
+sum(GT_info_sc_and_pool$actual_edit_hom[!(is.na(GT_info_sc_and_pool$actual_edit_hom))]!=GT_info_sc_and_pool$predicted_seq_edited[!(is.na(GT_info_sc_and_pool$actual_edit_hom))])
+GT_info_sc_and_pool$actual_equal_predicted_editing <- NA
+GT_info_sc_and_pool$actual_equal_predicted_editing[!(is.na(GT_info_sc_and_pool$actual_edit_hom))] <- GT_info_sc_and_pool$actual_edit_hom[!(is.na(GT_info_sc_and_pool$actual_edit_hom))]==GT_info_sc_and_pool$predicted_seq_edited[!(is.na(GT_info_sc_and_pool$actual_edit_hom))]
+
+df_compare_exact_editing <- data.frame(x=c("FALSE","TRUE"),percent=round(100*as.vector(table(GT_info_sc_and_pool$actual_equal_predicted_editing))/nrow(GT_info_sc_and_pool),0))
+
+
+print(ggplot(df_compare_exact_editing, aes(x="", y=percent, fill=x)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = paste0(percent, "%"),color="white"), position = position_stack(vjust = 0.5))+
+  scale_fill_manual(values=c("black","darkred"))+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+
+
+ 
+write.table(GT_info,file="GT_info.csv",sep=",",col.names=TRUE,row.names=FALSE)
+```
+
+What percentage of barcodes with a predicted edit has an in-window edit, what percentage has out-of-window edits?
+
+```{r in_out_window}
+
+GT_info_sc_and_pool$in_window_edit <- unlist(lapply(hom_editing_positions,function(x) any(x>3 & x < 10)))
+GT_info_sc_and_pool$out_of_window_edit <- unlist(lapply(hom_editing_positions,function(x) any(x<4 | x >= 10)))
+
+edit_in_out <- rep("neither",length(GT_info_sc_and_pool$out_of_window_edit))
+edit_in_out[GT_info_sc_and_pool$in_window_edit] <- "in_window"
+edit_in_out[GT_info_sc_and_pool$out_of_window_edit] <- "out_of_window"
+edit_in_out[GT_info_sc_and_pool$out_of_window_edit&GT_info_sc_and_pool$in_window_edit] <- "both"
+
+edit_in_out_predicted_edit <- edit_in_out[grepl("t",GT_info_sc_and_pool$predicted_seq_edited)]
+df_in_out_window_predicted_edited <- data.frame(x=names(table(edit_in_out_predicted_edit)),
+                    percent=round(100*as.vector(table(edit_in_out_predicted_edit))/length(edit_in_out_predicted_edit)))
+                                                
+ggplot(mapping=aes(x=names(table(edit_in_out_predicted_edit)),y=table(edit_in_out_predicted_edit)/length(edit_in_out_predicted_edit)))+ geom_bar(stat="identity") + theme_classic()+xlab("")+ylab("percentage of barcodes")
+
+print(ggplot(df_in_out_window_predicted_edited , aes(x="", y=percent, fill=x)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = paste0(percent, "%"),color="white"), position = position_stack(vjust = 0.5))+
+  scale_fill_manual(values=c("both"="purple","in_window"="darkred","out_of_window"="darkblue","neither"="grey"))+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+
+
+ 
+
+```
+
+What percentage of barcodes not predicted to have an edit, but targeting JAK1, has edits?
+
+```{r in_out_window_not_predicted}
+
+edit_in_out_predicted_no_edit <- edit_in_out[!(grepl("t",GT_info_sc_and_pool$predicted_seq_edited))]
+df_in_out_window_predicted_no_edited <- data.frame(x=names(table(edit_in_out_predicted_no_edit)),
+                    percent=round(100*as.vector(table(edit_in_out_predicted_no_edit))/length(edit_in_out_predicted_no_edit)),
+                    n=as.vector(table(edit_in_out_predicted_no_edit)))
+                                                
+ggplot(mapping=aes(x=names(table(edit_in_out_predicted_no_edit)),y=table(edit_in_out_predicted_no_edit)/length(edit_in_out_predicted_no_edit)))+ geom_bar(stat="identity") + theme_classic()+xlab("")+ylab("percentage of barcodes")
+
+print(ggplot(df_in_out_window_predicted_no_edited , aes(x="", y=percent, fill=x)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = n,color="white"), position = position_stack(vjust = 0.5))+
+  scale_fill_manual(values=c("both"="purple","in_window"="darkred","out_of_window"="darkblue","neither"="grey"))+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+
+
+ GT_info_sc_and_pool[!(grepl("t",GT_info_sc_and_pool$predicted_seq_edited))&GT_info_sc_and_pool$any_homozygous,]
+
+```
+
+Finally, we compare the actual versus predicted editing on a per-barcode level, similarly to the pie-charts above, which were on a per-gRNA level. 
+
+```{r}
+predicted_equal_actual_consequence <- GT_info_sc_and_pool$predicted_consequence==GT_info_sc_and_pool$worst_consequence
+
+df_compare_consequence <- data.frame(x=c("FALSE","TRUE"),percent=round(100*as.vector(table(predicted_equal_actual_consequence))/length(predicted_equal_actual_consequence),0))
+
+
+print(ggplot(df_compare_consequence , aes(x="", y=percent, fill=x)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = paste0(percent, "%")),color="white", position = position_stack(vjust = 0.5))+
+  scale_fill_manual(values=c("purple","magenta"))+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+
+
+
+```
+
+Saving barcode annotation file
+
+```{r}
+GT_info$actual_edit_hom <- NA
+GT_info$actual_equal_predicted_editing <- NA
+GT_info$out_of_window_edit <- NA
+GT_info$actual_edit_hom[match(GT_info_sc_and_pool$gRNA_iBAR, GT_info$gRNA_iBAR)] <- GT_info_sc_and_pool$actual_edit_hom
+GT_info$actual_equal_predicted_editing[match(GT_info_sc_and_pool$gRNA_iBAR, GT_info$gRNA_iBAR)] <- GT_info_sc_and_pool$actual_equal_predicted_editing
+GT_info$out_of_window_edit[match(GT_info_sc_and_pool$gRNA_iBAR, GT_info$gRNA_iBAR)] <- GT_info_sc_and_pool$out_of_window_edit
+GT_info[GT_info$gene == "JAK1" & is.na(GT_info$gRNA_seq),]
+
+write.table(GT_info,file="GT_info.csv",sep=",",col.names=TRUE,row.names=FALSE)
+```
