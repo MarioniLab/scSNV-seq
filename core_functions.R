@@ -61,10 +61,11 @@ read_in_filtered_matrix <- function(name_path)
 #' default value 1; the value it should be set to depends on the sequencing depth, 
 #' set to a value that can safely be assumed to be ambient noise, but also high enough
 #' in case sequencing is deeper to avoid inefficiency and modelling errors by huge numbers
-#' of low ambient counts included in the mixture modelling
+#' of low ambient counts included in the mixture modelling (by visual inspection of the histogram of barcode counts, will be automated in
+#' future versions);
 #' @param g number of components of the mixture model. Generally 3 components are recommended, as the 
 #' 'signal component' corresponding to gRNAs assigned to cells tends to be bimodal. For specific data sets
-#' g=2 or other values may improve assignment, but changing g should be based on prior inspection of the data. 
+#' g=2 or other values may improve assignment, but changing g should be based on prior inspection of the data and is not generally recommended.
 #' @export
 barcode_calling <- function(barcode_matrix,sample_name="",barcode_name="gRNA",thresh=1,g=3){
   temp <- barcode_matrix[barcode_matrix  > thresh]
@@ -134,9 +135,11 @@ cell_cycle_scoring <- function(sce)
 
 
 #' @title QC_mRNA_outlier
-#' QC for mRNA modality, removes low outliers for the total count, low outliers for the number of detected features 
+#' QC for mRNA modality, removes low outliers for the total count, low outliers for the number of detected features for cells from homo sapiens
 #' and high outliers for the percentage of counts from mitochondrial genes 
 #' @param mRNA_counts matrix of UMI counts (rows:genes, columns:cells), rownames need to be the ensembl gene ids
+#' @returns logical vector whose length is equal to the number of cells, and that
+#' indicates if a cell should be discarded (TRUE) or kept (FALSE)
 #' @export
 QC_mRNA_outlier <- function(mRNA_counts,file_name="")
 {

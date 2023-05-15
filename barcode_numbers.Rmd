@@ -1,0 +1,273 @@
+---
+title: "Numbers of barcodes with different properties"
+author: "Magdalena Strauss"
+output:
+  BiocStyle::html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes  
+---
+
+This script summaries our results on barcode level and compares predicted and actual editing. 
+
+```{r}
+library(ggplot2)
+library(pheatmap)
+# knitr::opts_chunk$set(
+#     echo = FALSE,
+#     message = FALSE,
+#     warning = FALSE,
+#     message = FALSE,
+#     cache=FALSE,
+#     dev = c("pdf"),
+#     dpi=300
+# )
+library(dplyr)
+GT_info <- readRDS("MissionBio/GT_barcode_metadata.rds")
+```
+
+Total number of confidently genotyped barcodes: `r nrow(GT_info)`.
+
+Number of confidently genotyped barcodes with scRNA-seq representation: `r sum(!(is.na(GT_info$diffusion_score)))`
+
+Number of unique genotypes: `r length(unique(GT_info$GT))`
+
+Number of unique genotypes with scRNA-seq representation: `r length(unique(GT_info$GT[!(is.na(GT_info$diffusion_score))]))`
+
+
+# Differences between genotyped and expected edits
+
+Loading the predicted data (as in Coelho et al. (2023) Cancer Cell.)
+
+```{r}
+aa <- read.table("MissionBio/mutation_file_Coelho_2023.csv",sep=",",head=TRUE)
+GT_info$predicted_seq_edited <- aa$predicted_edit[match(GT_info$gRNA,aa$sgRNA_ID)]
+GT_info$gRNA_seq <- aa$guide[match(GT_info$gRNA,aa$sgRNA_ID)]
+```
+
+Comparing actual versus predicted consequences for JAK1 targeting gRNAs
+
+```{r}
+GT_info_sc_and_pool <- GT_info[GT_info$gRNA%in%aa$sgRNA_ID,]#gRNAs targeting JAK1 present for both experiments 
+GT_info_sc_and_pool <- GT_info_sc_and_pool[!(grepl("not_covered",GT_info_sc_and_pool$predicted_consequence)),]#excluding promoter gRNAs not covered by the amplicons
+colours_consequence <-  c("stop codon"="darkred","missense"="red","splice variant"="orange","promoter"="yellow","UTR"="purple","het"="darkblue","WT"="#000000","intron"="green","synonymous"="#ADD8E6")
+GT_info_sc_and_pool$worst_consequence[GT_info_sc_and_pool$GT=="WT"] <- "WT"
+GT_info_sc_and_pool$worst_consequence[is.na(GT_info_sc_and_pool$worst_consequence)] <- "het"
+GT_info_sc_and_pool$worst_consequence[grepl("UTR",GT_info_sc_and_pool$worst_consequence)] <- "UTR"
+GT_info_sc_and_pool$predicted_consequence[!(grepl("t",GT_info_sc_and_pool$predicted_seq_edited))] <- "WT"
+
+```
+
+
+```{r consequence_predicted_versus_actual}
+df_consequence <- data.frame(gRNA=GT_info_sc_and_pool$gRNA,consequence=GT_info_sc_and_pool$worst_consequence)
+consequence_count <- df_consequence %>% group_by_all() %>% dplyr::count()
+consequence_count$all_consequence <- NA
+for (j in 1:nrow(consequence_count)){
+  xx <- which(consequence_count$gRNA==consequence_count$gRNA[j])
+  consequence_count$all_consequence[j] <- consequence_count$consequence[xx[1]]
+  if (length(xx) >1){
+    for (k in 2:length(xx)){
+      consequence_count$all_consequence[j] <- paste0(consequence_count$all_consequence[j] ,"/",consequence_count$consequence[xx[k]])
+    }
+  }
+}
+df_consequence <- consequence_count[,c(1,4)]
+df_consequence <- distinct(df_consequence)
+df_consequence$predicted_consequence <- GT_info_sc_and_pool$predicted_consequence[match(df_consequence$gRNA,GT_info_sc_and_pool$gRNA)]
+```
+
+
+
+For each consequence, plot differences between predicted and actual consequence
+
+```{r predicted_versus_actual_ind}
+df_consequence_count <- df_consequence[,2:3] %>% group_by_all() %>% dplyr::count()
+colours_consequence_extended <- c(colours_consequence,"stop codon/synonymous" = "#CBC3E3","het/stop codon"="magenta",
+                                  "missense/WT" = "beige")
+for (j in 1:length(unique(df_consequence_count$predicted_consequence))){
+  df <- df_consequence_count[df_consequence_count$predicted_consequence == unique(df_consequence_count$predicted_consequence)[j],]
+ df_count <- data.frame(consequence_called = df$all_consequence,
+            percent=round(100*df$n/sum(df$n),0),number=df$n)
+  print(ggplot(df_count, aes(x="", y=percent, fill=consequence_called)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = number), position = position_stack(vjust = 0.5),color="white")+
+  scale_fill_manual(values=colours_consequence_extended)+ggtitle(paste0("predicted ",unique(df_consequence_count$predicted_consequence)[j]))+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+}
+```
+For all JAK1 targeting barcodes covered by the amplicons
+
+```{r predicted_versus_actual_all}
+ df_count <- data.frame(consequence_called = names(table(df_consequence[,2])),number=as.vector(table(df_consequence[,2])))
+  print(ggplot(df_count, aes(x="", y=number, fill=consequence_called)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = number),color="red", position = position_stack(vjust = 0.5))+
+  scale_fill_manual(values=colours_consequence_extended)+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+
+```
+
+
+# Checking false negatives and false positives 
+
+Plotting the distributions of diffusion scores of barcodes called as WT and barcodes called as stop codons. 
+
+Diffusion score distribution for all barcodes assigned the WT genotype. This comparison includes all gRNAs (also those not targeting JAK1), but excludes gRNAs targeting those parts of the promoter region or UTR of JAK that are not covered by amplicons and those that are not represented on the scRNAseq side.
+
+```{r checking_FNR,fig.height=3}
+GT_info_excluding_not_covered <- GT_info[!(grepl("not_covered",GT_info$predicted_consequence)) & !(is.na(GT_info$diffusion_score)),]
+ggplot(mapping=aes(x=GT_info_excluding_not_covered$diffusion_score[GT_info_excluding_not_covered$GT=="WT"])) + geom_histogram() + theme_classic(base_size=16) + xlab("diffusion score")+
+  ylab("number of barcodes") + ggtitle("barcodes called as WT") + xlim(c(-0.005,0.02))
+
+```
+Diffusion score distribution for all barcodes assigned a stop codon genotype. 
+
+```{r checking_FDR,fig.height=3}
+ggplot(mapping=aes(x=GT_info_excluding_not_covered$diffusion_score[GT_info_excluding_not_covered$worst_consequence=="stop codon"])) + geom_histogram() + theme_classic(base_size=16) + xlab("diffusion score")+
+  ylab("number of barcodes") + ggtitle("barcodes called as stop codon") + xlim(c(-0.005,0.019))
+
+```
+Barcodes called as splice variants
+
+```{r checking_FNR_splice,fig.height=3}
+ggplot(mapping=aes(x=GT_info_excluding_not_covered$diffusion_score[GT_info_excluding_not_covered$worst_consequence=="splice variant"])) + geom_histogram() + theme_classic(base_size=13) + xlab("diffusion score")+
+  ylab("number of barcodes") + ggtitle("barcodes called as splice variant") + xlim(c(-0.005,0.019))
+
+```
+
+Precision and recall for called mutations for stop/splice versus WT: The total number of barcodes (excluding barcodes with UTR/promoter gRNAs not covered by amplicons or barcodes not represented in the scRNAseq) called as having stop codons or splice variants is `r sum(GT_info_excluding_not_covered$worst_consequence %in% c("stop codon","splice variant"))`. The total number of barcodes called as WT is `r sum(GT_info_excluding_not_covered$GT=="WT")`. Out of this total of `r sum(GT_info_excluding_not_covered$worst_consequence %in% c("stop codon","splice variant"))+sum(GT_info_excluding_not_covered$GT=="WT")` barcodes, `r sum(GT_info_excluding_not_covered$diffusion_score > 0.0075 & GT_info_excluding_not_covered$worst_consequence %in% c("stop codon","splice variant"))` are true positives, and `r sum(GT_info_excluding_not_covered$diffusion_score <= 0.0075 & GT_info_excluding_not_covered$worst_consequence %in% c("stop codon","splice variant"))` are false positives, while `r sum(GT_info_excluding_not_covered$diffusion_score > 0.0075 & GT_info_excluding_not_covered$GT=="WT")` are false negatives. 
+
+Precision and recall for predicted mutations for stop/splice versus WT: The total number of barcodes (excluding barcodes with UTR/promoter gRNAs not covered by amplicons or barcodes not represented in the scRNAseq) predicted as having stop codons or splice variants is `r sum(GT_info_excluding_not_covered$predicted_consequence %in% c("stop codon","splice variant"))`. The total number of barcodes predicted as WT is `r sum(GT_info_excluding_not_covered$predicted_consequence%in%c(NA,"not predicted"))`. Out of this total of `r sum(GT_info_excluding_not_covered$predicted_consequence %in% c("stop codon","splice variant"))+sum(GT_info_excluding_not_covered$predicted_consequence%in%c(NA,"not predicted"))` barcodes, `r sum(GT_info_excluding_not_covered$diffusion_score > 0.0075 & GT_info_excluding_not_covered$predicted_consequence %in% c("stop codon","splice variant"))` are true positives, and `r sum(GT_info_excluding_not_covered$diffusion_score <= 0.0075 & GT_info_excluding_not_covered$predicted_consequence %in% c("stop codon","splice variant"))` are false positives, while `r sum(GT_info_excluding_not_covered$diffusion_score > 0.0075 & GT_info_excluding_not_covered$predicted_consequence%in%c(NA,"not predicted"))` are false negatives. 
+
+
+Fisher's exact test to compare predicted and actual consequence for not LoF phenotypes
+
+```{r}
+GT_info_excluding_not_covered_not_LoF <- GT_info_excluding_not_covered[GT_info_excluding_not_covered$diffusion_score<=0.0075,]
+not_LoF_predicted_stop_splice <- sum(GT_info_excluding_not_covered_not_LoF$predicted_consequence%in%c("stop codon","splice variant"))
+not_LoF_predicted_WT <- sum(GT_info_excluding_not_covered_not_LoF$predicted_consequence%in%c(NA,"not predicted"))
+not_LoF_called_stop_splice <- sum(GT_info_excluding_not_covered_not_LoF$worst_consequence%in%c("stop codon","splice variant"))
+not_LoF_called_WT <- sum(GT_info_excluding_not_covered_not_LoF$GT=="WT")
+
+table_not_LoF <- rbind(c(not_LoF_predicted_stop_splice,not_LoF_predicted_WT),c(not_LoF_called_stop_splice,not_LoF_called_WT))
+fisher.test(table_not_LoF)
+```
+
+#Number of barcodes per gRNA
+
+The following is a barplot of the number of barcodes per gRNA for the scDNA-experiment. 
+
+```{r, barocdes_per_gRNA}
+ggplot(mapping=aes(x=as.factor(c(table(GT_info$gRNA),table(GT_info$gRNA[!(is.na(GT_info$diffusion_score))]))),
+          fill=c(rep("DNA",length(table(GT_info$gRNA))),rep("DNA+RNA",length(table(GT_info$gRNA[!(is.na(GT_info$diffusion_score))])))))) + geom_histogram(position="dodge",stat="count") + theme_classic(base_size=16) +xlab("number of barcodes per gRNA")+
+  ylab("number of gRNAs")+labs(fill="") + scale_fill_manual(values=c("DNA"="blue","DNA+RNA"="magenta"))
+```
+
+# Comparing actual and predicted editing
+
+Is the actual editing exactly equal to the predicted editing? This analysis is on a per-barcode rather than per-gRNA level, for those barcodes with a JAK1 targeting gRNA covered by an amplicon. 
+
+```{r actual_versus_predicted_editing}
+extract_hom_editing_positions <- function(v){
+  w <- strsplit(v,";")[[1]]
+  w_hom <- w[grepl("1/1/1",w)]
+  w_hom <- sapply(w_hom,function(x) strsplit(x,"[(]")[[1]][1])
+  w_hom <- sapply(w_hom,as.double)
+  return(w_hom)
+}
+
+hom_editing_positions <- sapply(GT_info_sc_and_pool$editing_positions,extract_hom_editing_positions)
+
+mark_edit_on_seq <- function(gRNA,editing_positions){
+  #input is the gRNA sequence and editing positions
+  #the function replaces C by t in the gRNA for each edited position
+  gRNA_edited <- gRNA
+    for (j in 1:length(editing_positions)){
+      substring(gRNA_edited,editing_positions[j],editing_positions[j])  <- "t"
+    }
+  return(gRNA_edited)
+}
+
+gRNAs_edited <- GT_info_sc_and_pool$gRNA_seq
+for (j in 1:nrow(GT_info_sc_and_pool)){
+  if (GT_info_sc_and_pool$any_homozygous[j]){
+     gRNAs_edited[j] <- mark_edit_on_seq(GT_info_sc_and_pool$gRNA_seq[j],hom_editing_positions[[j]])
+  }
+}
+
+GT_info_sc_and_pool$actual_edit_hom <- gRNAs_edited
+sum(GT_info_sc_and_pool$actual_edit_hom[!(is.na(GT_info_sc_and_pool$actual_edit_hom))]==GT_info_sc_and_pool$predicted_seq_edited[!(is.na(GT_info_sc_and_pool$actual_edit_hom))])
+sum(GT_info_sc_and_pool$actual_edit_hom[!(is.na(GT_info_sc_and_pool$actual_edit_hom))]!=GT_info_sc_and_pool$predicted_seq_edited[!(is.na(GT_info_sc_and_pool$actual_edit_hom))])
+GT_info_sc_and_pool$actual_equal_predicted_editing <- NA
+GT_info_sc_and_pool$actual_equal_predicted_editing[!(is.na(GT_info_sc_and_pool$actual_edit_hom))] <- GT_info_sc_and_pool$actual_edit_hom[!(is.na(GT_info_sc_and_pool$actual_edit_hom))]==GT_info_sc_and_pool$predicted_seq_edited[!(is.na(GT_info_sc_and_pool$actual_edit_hom))]
+
+df_compare_exact_editing <- data.frame(x=c("FALSE","TRUE"),percent=round(100*as.vector(table(GT_info_sc_and_pool$actual_equal_predicted_editing))/nrow(GT_info_sc_and_pool),0))
+
+
+print(ggplot(df_compare_exact_editing, aes(x="", y=percent, fill=x)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = paste0(percent, "%"),color="white"), position = position_stack(vjust = 0.5))+
+  scale_fill_manual(values=c("black","darkred"))+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+
+
+```
+
+What percentage of barcodes with a predicted edit has an in-window edit, what percentage has out-of-window edits?
+
+```{r in_out_window}
+
+GT_info_sc_and_pool$in_window_edit <- unlist(lapply(hom_editing_positions,function(x) any(x>3 & x < 10)))
+GT_info_sc_and_pool$out_of_window_edit <- unlist(lapply(hom_editing_positions,function(x) any(x<4 | x >= 10)))
+
+edit_in_out <- rep("neither",length(GT_info_sc_and_pool$out_of_window_edit))
+edit_in_out[GT_info_sc_and_pool$in_window_edit] <- "in_window"
+edit_in_out[GT_info_sc_and_pool$out_of_window_edit] <- "out_of_window"
+edit_in_out[GT_info_sc_and_pool$out_of_window_edit&GT_info_sc_and_pool$in_window_edit] <- "both"
+
+edit_in_out_predicted_edit <- edit_in_out[grepl("t",GT_info_sc_and_pool$predicted_seq_edited)]
+df_in_out_window_predicted_edited <- data.frame(x=names(table(edit_in_out_predicted_edit)),
+                    percent=round(100*as.vector(table(edit_in_out_predicted_edit))/length(edit_in_out_predicted_edit)))
+                                                
+ggplot(mapping=aes(x=names(table(edit_in_out_predicted_edit)),y=table(edit_in_out_predicted_edit)/length(edit_in_out_predicted_edit)))+ geom_bar(stat="identity") + theme_classic()+xlab("")+ylab("percentage of barcodes")
+
+print(ggplot(df_in_out_window_predicted_edited , aes(x="", y=percent, fill=x)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = paste0(percent, "%"),color="white"), position = position_stack(vjust = 0.5))+
+  scale_fill_manual(values=c("both"="purple","in_window"="darkred","out_of_window"="darkblue","neither"="grey"))+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+
+
+ 
+
+```
+
+
+
+Finally, we compare the actual versus predicted editing on a per-barcode level, similarly to the pie-charts above, which were on a per-gRNA level. 
+
+```{r}
+predicted_equal_actual_consequence <- GT_info_sc_and_pool$predicted_consequence==GT_info_sc_and_pool$worst_consequence
+
+df_compare_consequence <- data.frame(x=c("FALSE","TRUE"),percent=round(100*as.vector(table(predicted_equal_actual_consequence))/length(predicted_equal_actual_consequence),0))
+
+
+print(ggplot(df_compare_consequence , aes(x="", y=percent, fill=x)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + geom_text(aes(label = paste0(percent, "%")),color="white", position = position_stack(vjust = 0.5))+
+  scale_fill_manual(values=c("purple","magenta"))+ theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
+
+
+
+```
+
+Saving barcode annotation file
+
+```{r}
+GT_info$actual_edit_hom <- NA
+GT_info$actual_equal_predicted_editing <- NA
+GT_info$out_of_window_edit <- NA
+GT_info$actual_edit_hom[match(GT_info_sc_and_pool$gRNA_iBAR, GT_info$gRNA_iBAR)] <- GT_info_sc_and_pool$actual_edit_hom
+GT_info$actual_equal_predicted_editing[match(GT_info_sc_and_pool$gRNA_iBAR, GT_info$gRNA_iBAR)] <- GT_info_sc_and_pool$actual_equal_predicted_editing
+GT_info$out_of_window_edit[match(GT_info_sc_and_pool$gRNA_iBAR, GT_info$gRNA_iBAR)] <- GT_info_sc_and_pool$out_of_window_edit
+GT_info[GT_info$gene == "JAK1" & is.na(GT_info$gRNA_seq),]
+
+write.table(GT_info,file="GT_info.csv",sep=",",col.names=TRUE,row.names=FALSE)
+```

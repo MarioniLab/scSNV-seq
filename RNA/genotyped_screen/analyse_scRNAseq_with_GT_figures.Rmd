@@ -40,7 +40,8 @@ knitr::opts_chunk$set(
     dpi=300
 )
 ```
-This notebook was used to analyse the RNA modality of the genotyped data set after QC and gRNA calling. 
+
+This notebook was used to analyse the RNA modality of the genotyped data set after QC and gRNA calling. It also integrates the RNA with the DNA modality.  
 
 ```{r}
 sce_file <- "sce_with_MissionBio_unique_barcode_no_cc_genes.rds"
@@ -149,22 +150,10 @@ clusters <-  matrix(0,nrow=nrow(knns$index),ncol=ncol(knns$index))
     cluster.mapped[j] <- getmode(clusters[j,],1:ncol(clusters))
   }
 
-gRNAs <-  matrix(0,nrow=nrow(knns$index),ncol=ncol(knns$index))
-  for (j in 1:nrow(knns$index))
-  {
-    xx <- match(k.mapped[j,], colnames(sce_bigBE))
-    gRNAs[j,] <- sce_bigBE$gRNA[xx]
-  }
-  
-  gRNA.mapped <- rep("",nrow(gRNAs))
-  for (j in 1:nrow(gRNAs)){
-    gRNA.mapped[j] <- getmode(gRNAs[j,],1:ncol(gRNAs))
-  }
 
   
 reducedDims(sce_knownGT)$UMAP <- reducedDims(sce_bigBE)$UMAP[sce_knownGT$nearest_bigBE_cell,]
 sce_knownGT$cluster <- cluster.mapped
-sce_knownGT$mapped_gRNA <- gRNA.mapped
 
 
 ```
@@ -197,6 +186,7 @@ plotReducedDim(cbind(sce_knownGT[,is.na(sce_knownGT$facs_z_score_edited)],
                  sce_knownGT[,!(is.na(sce_knownGT$facs_z_score_edited))]) ,colour_by="facs_z_score_edited",dimred="UMAP") +ggtitle("genotyped data") + theme(legend.position = "bottom")  + theme_classic(base_size=16)+ theme(legend.position = "bottom")
 #+guides(color=guide_legend(nrow=2))
 ```
+
 Plotting the proliferation z-scores based on only genotyped cells. WT cells are in grey. 
 
 ```{r prolif_cluster_edited}
@@ -210,12 +200,14 @@ plotReducedDim(cbind(sce_knownGT[,is.na(sce_knownGT$prolif_z_score_edited)],
                  sce_knownGT[,!(is.na(sce_knownGT$prolif_z_score_edited))]) ,colour_by="prolif_z_score_edited",dimred="UMAP") +ggtitle("genotyped data") + theme(legend.position = "bottom")  + theme_classic(base_size=16)+ theme(legend.position = "bottom")
 #+guides(color=guide_legend(nrow=2))
 ```
+
 # UMAP plots illustrating distribution of mutational consequence
 
 The following plots highlight mutational consequences on the UMAPs.
 
 ```{r }
 sce_knownGT$gene <- GT_info$gene[match(sce_knownGT$gRNA_iBAR_seq,GT_info$gRNA_iBAR)]
+sce_knownGT$amplicon <- GT_info$amplicon[match(sce_knownGT$gRNA_iBAR_seq,GT_info$gRNA_iBAR)]
 sce_knownGT$consequence <- GT_info$worst_consequence[match(sce_knownGT$gRNA_iBAR_seq ,GT_info$gRNA_iBAR)]
 sce_knownGT$consequence[!(sce_knownGT$edited)] <- "WT"
 sce_knownGT$any_homozygous <- GT_info$any_homozygous[match(sce_knownGT$gRNA_iBAR_seq ,GT_info$gRNA_iBAR)]
@@ -246,6 +238,7 @@ print(plotReducedDim(sce_temp,colour_by = "consequence",dimred="UMAP") +
 }
 
 ```
+
 # Distribution of barcodes across clusters 
 
 We compute the distribution of barcodes and consequences across the LoF and the not LoF cluster. 
@@ -298,7 +291,7 @@ for (j in 1:length(unique(df_cluster_iBAR_count$gRNA_iBAR))){
 GT_info
 ```
 
-We plot the distribution of the different possible consequences across the two clusters. 
+We plot the distribution of the consequences across the two clusters. 
 
 ```{r cluster_consequence_filtered}
 
@@ -312,20 +305,11 @@ print(ggplot(mapping=aes(x=sce_temp$cluster,fill=sce_temp$consequence)) +geom_ba
   scale_fill_manual(values=colours_consequence) + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 4)))
 
 ```
-
-Repeating the above plot with predicted consequence instead of consequence
-
-```{r predicted_cluster_consequence_filtered}
-
-print(ggplot(mapping=aes(x=sce_temp$cluster,fill=sce_temp$predicted_consequence)) +geom_bar(aes( y=..count../tapply(..count.., ..x.. ,sum)[..x..])) +
-     ylab("") +labs(fill="") + xlab("cluster") + theme_bw(base_size=15)+ggtitle("Consequence (VEP, based on prediction)")+
-  scale_fill_manual(values=colours_consequence) + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 4)))
-
-```
-We compare the distribution of actual and predicted consequences across clusters.
+We compare the distribution of actual and predicted consequences across clusters, using Fisher's exact test. 
 
 ```{r}
-levels <- unique(c(sce_temp$predicted_consequence,sce_temp$consequence))
+#removing small minority of cells with gRNAs predicted to cause promoter or UTR mutations not covered by the amplicons
+levels <- unique(c(sce_temp$predicted_consequence[!(grepl("not_covered",sce_temp$predicted_consequence))],sce_temp$consequence))
 predicted_LoF <- table(factor(sce_temp$predicted_consequence[sce_temp$cluster=="LoF"],levels=levels))
 predicted_not_LoF <- table(factor(sce_temp$predicted_consequence[sce_temp$cluster=="not_LoF"],levels=levels))
 called_LoF <- table(factor(sce_temp$consequence[sce_temp$cluster=="LoF"],levels=levels))
@@ -456,11 +440,12 @@ df_row_cor$z_score_binned[df_row_cor$z_score >= 2 & df_row_cor$z_score < 3] <- "
 df_row_cor$z_score_binned[df_row_cor$z_score >= 3] <- "[3,Inf)"
 df_row_cor$z_score_binned <- factor(df_row_cor$z_score_binned,levels=c("[-2,-1)","[-1,1)","[1,2)","[2,3)","[3,Inf)"))
 rownames(df_row_cor) <- colnames(cor_effect)
-df_row_cor$predicted_consequence[is.na(df_row_cor$predicted_consequence)] <- "WT"
-df_row_cor$predicted_consequence[df_row_cor$predicted_consequence=="not predicted"] <- "WT"# cells with a gRNA not targeting JAK1
+df_row_cor$predicted_consequence[is.na(df_row_cor$predicted_consequence)] <- "WT" #targeting JAK1, no edits 
+df_row_cor$predicted_consequence[df_row_cor$predicted_consequence=="not predicted"] <- "WT" #not targeting JAK1 or its promoter region
+df_row_cor$predicted_consequence[grepl("not_covered",df_row_cor$predicted_consequence)] <- "not covered" #promoter, UTR of JAK1
 my_colour = list(
     consequence = colours_consequence,
-    predicted_consequence=c(colours_consequence,"not predicted"="white"),
+    predicted_consequence=c(colours_consequence,"not covered"="white"),
     z_score_binned = c("[-2,-1)"="darkred","[-1,1)"="purple","[1,2)"="blue","[2,3)"="darkblue","[3,Inf)"="black","NA"="grey"),
     gene=c("other"="grey","JAK1"="darkblue"),edited=c("WT"="blue","het"="purple","hom"="red")
 )

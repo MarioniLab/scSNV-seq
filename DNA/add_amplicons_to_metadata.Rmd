@@ -1,0 +1,49 @@
+---
+title: "Assign amplicons to the meta-data file"
+output:
+  BiocStyle::html_document:
+    number_sections: yes
+    toc: yes  
+---
+
+This notebook adds to the barcode meta-data whether the gRNA was covered by one of the MissionBio amplicons, and the name of the amplicon. 
+It needs to be run after GT_per_barcode.Rmd and before analyse_scRNAseq_with_genotype_figures.Rmd. 
+
+```{r}
+GT_info <- readRDS("GT_barcode_metadata.rds")
+amplicons <- read.table("amplicons.txt")
+assign_amplicon <- function(start_gRNA,end_gRNA,strand){
+  if (strand=="+"){
+    start_window <- as.double(start_gRNA)+3
+    end_window <- as.double(start_gRNA)+8
+  }else if (strand=="-"){
+    end_window <- as.double(start_gRNA)+19
+    start_window <- as.double(start_gRNA)+14
+  }
+  aa <- end_window < as.double(amplicons[,3])
+  bb <-  start_window > as.double(amplicons[,2])
+  v <- "not_covered"
+  if (any (aa&bb)){
+    v <- amplicons[aa&bb,4]
+    if (length(v) > 1){
+      w <- v
+      v <- w[1]
+      for (k in 2:length(v)){
+        v <- paste0(v,";",w[k])
+      }
+    }
+  }
+   return(v)}
+df_gRNA_amplicon <- data.frame(gRNA=GT_info$gRNA,
+          amplicon=sapply(1:nrow(GT_info),function(x) assign_amplicon(GT_info$start[x],GT_info$end[x],GT_info$strand[x])))
+GT_info$amplicon <- df_gRNA_amplicon$amplicon
+```
+
+If a gRNA is not covered by any amplicon, we add this to the predicted consequence. 
+
+```{r}
+GT_info$predicted_consequence[GT_info$amplicon=="not_covered" & GT_info$gene=="JAK1"] <- paste0(GT_info$predicted_consequence[GT_info$amplicon=="not_covered" & GT_info$gene=="JAK1"],";",GT_info$amplicon[GT_info$amplicon=="not_covered"& GT_info$gene=="JAK1"])
+write.table(GT_info,"GT_barcode_metadata.csv",sep=",",col.names=TRUE,row.names=FALSE)
+saveRDS(GT_info,file="GT_barcode_metadata.rds")
+
+```
