@@ -284,7 +284,7 @@ df_GT_puro_iBAR$SIFT[grepl("-",df_GT_puro_iBAR$SIFT)] <- NA
 Adding scores from a FACS-based screen from Coelho et al.(2023).
 
 ```{r}
-original_gRNAs_info <- read.table("mutation_file_Coelho_2023.csv",sep=",",header=TRUE)
+original_gRNAs_info <- read.table("mutation_file_Coelho_2023.csv",sep=",",header=TRUE)#publicly available meta data from Coelho et al. (2023). Cell.
 original_gRNAs_info <- original_gRNAs_info[grepl("BE3-NGG",original_gRNAs_info$editor),]
 original_gRNAs_info_JAK1 <- original_gRNAs_info[grepl("JAK1",original_gRNAs_info$editor),]
 intersected_gRNA <- intersect(original_gRNAs_info$sgRNA_ID,df_GT_puro_iBAR$gRNA)

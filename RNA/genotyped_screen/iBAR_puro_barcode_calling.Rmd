@@ -1,0 +1,224 @@
+---
+title: "Processing, iBAR and puro-barcode calling for scRNA-seq data set with corresponding scDNA-seq data set"
+author: "Magdalena Strauss"
+output:
+  html_document:
+    number_sections: yes
+    toc: yes  
+    keep_md: yes 
+---
+
+# Setup
+
+```{r,setup}
+library(bluster)
+source("../core_functions.R")
+library("batchelor")
+library("scater")
+library(scran)
+library(dplyr)
+library(igraph)
+library(Biostrings)
+set.seed(4444)
+
+file_sce_list <- "sces_with_MissionBio.rds"
+sce_save_file <- "sce_with_MissionBio_unique_barcode_no_cc_genes.rds"
+file_cc_genes <- "GO.0007049.csv"
+gRNA_assignment_file <- "gRNA_assignment_10x_with_corresponding_MB.rds"
+iBAR_raw_matrices_cellranger_folders <- c("/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/sampleA_iBAR/outs/raw_feature_bc_matrix/",
+                                          "/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/sampleB_iBAR/outs/raw_feature_bc_matrix/")
+puroBC_raw_matrices_cellranger_folders <- c("/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/sampleA_puroBC/outs/raw_feature_bc_matrix/",
+                                          "/nfs/research/marioni/magda/scJAK1_August_2022_cellranger/sampleB_puroBC/outs/raw_feature_bc_matrix/")
+iBAR_assignment_save_file <- "iBAR_assignment_data_with_MB.rds"
+puroBC_assignment_save_file <- "puro_assignment_data_with_MB.rds"
+```
+
+# Read in QC-ed mRNA matrices and gRNA assignments and normalise.
+
+```{r}
+sce_list <- readRDS(file_sce_list)
+sce_list <- multiBatchNorm(sce_list)
+for (j in 1:length(sce_list)){
+  colnames(sce_list[[j]]) <- paste0(substring(colnames(sce_list[[j]]),1,16),"-",toString(j))
+}
+merged_sce <- do.call(cbind,sce_list)
+gRNA_assignment <- readRDS(gRNA_assignment_file)
+merged_sce<- merged_sce[,intersect(colnames(merged_sce),names(gRNA_assignment$barcode_assignment$barcode_assignment))]
+saveRDS(merged_sce,file="merged_sce_MB_before_gRNA_assignment.rds")
+merged_sce$gRNA <- gRNA_assignment$barcode_assignment$barcode_assignment[colnames(merged_sce)]
+```
+
+Cell-cycle related genes are removed to avoid interference with analysis of impact of JAK1 mutations. 
+
+```{r}
+cc_genes <- unique(read.table(file_cc_genes,sep=",")$V1)
+merged_sce_single_gRNA_no_cc <- merged_sce[!(rownames(merged_sce) %in% cc_genes),!(grepl("-",merged_sce$gRNA))]
+```
+
+# Assigning iBAR barcodes
+
+The first step is to read in the cellranger output. 
+
+```{r,eval=FALSE}
+iBAR_matrix <- c()
+
+merged_sce_single_gRNA_no_cc$iBAR <- NA
+for (j in 1:2){
+  raw_matrix <- readMM(paste0(iBAR_raw_matrices_cellranger_folders[j],"/raw_feature_bc_matrix/matrix.mtx.gz"))
+  features <- read.delim(paste0(iBAR_raw_matrices_cellranger_folders[j],"/features.tsv.gz"),header=F,stringsAsFactors = F)
+  barcodes <- read.delim(paste0(iBAR_raw_matrices_cellranger_folders[j],"/barcodes.tsv.gz"),header=F,stringsAsFactors = F)
+  rownames(raw_matrix) <- features[,1]
+  colnames(raw_matrix) <- paste0(substring(barcodes[,1],1,16),"-",j)
+  iBAR_matrix <- cbind(iBAR_matrix,raw_matrix[grepl("iBAR",rownames(raw_matrix)),colnames(raw_matrix)%in%colnames(merged_sce_single_gRNA_no_cc)])
+}
+
+iBAR_matrix <- iBAR_matrix[rowSums(iBAR_matrix) > 2,]
+```
+Now the iBAR barcodes are assigned using the mixture of skewed normals approach. 
+
+```{r, eval = FALSE}
+iBAR_assignment <- barcode_calling(iBAR_matrix,"iBAR 10x data with MissionBio",barcode_name="iBAR")
+
+saveRDS(iBAR_assignment,file=iBAR_assignment_save_file)
+```
+
+```{r}
+iBAR_assignment <- readRDS(iBAR_assignment_save_file)
+merged_sce_single_gRNA_no_cc$iBAR <- NA
+merged_sce_single_gRNA_no_cc$iBAR[match(names(iBAR_assignment$barcode_assignment$barcode_assignment),colnames(merged_sce_single_gRNA_no_cc))] <- iBAR_assignment$barcode_assignment$barcode_assignment
+```
+
+The following plot illustrates the distribution of cell numbers across iBARs. 
+
+```{r iBAR_cell_distribution}
+non_NA_iBAR <- merged_sce_single_gRNA_no_cc$iBAR[!(is.na(merged_sce_single_gRNA_no_cc$iBAR))]
+iBAR_unique <-  non_NA_iBAR[!(grepl("-", non_NA_iBAR))]
+ggplot(mapping=aes(x=log2(table(iBAR_unique))))+geom_histogram()+theme_classic(base_size=16) + ylab("number of iBAR barcodes")+
+  xlab("log2 of number of cells") + ggtitle("Number of cells across iBARs")
+
+```
+
+# Unique gRNA-iBAR combinations
+
+Subsetting the SingleCellExperiment to cells with a unique gRNA-iBAR combination
+
+```{r}
+merged_sce_single_gRNA_no_cc <- merged_sce_single_gRNA_no_cc[,!(grepl("-",merged_sce_single_gRNA_no_cc$iBAR))]
+merged_sce_single_gRNA_no_cc$gRNA_iBAR <- paste0(merged_sce_single_gRNA_no_cc$gRNA,"-",merged_sce_single_gRNA_no_cc$iBAR)
+merged_sce_single_gRNA_iBAR_no_cc <- merged_sce_single_gRNA_no_cc[,!(grepl("NA",merged_sce_single_gRNA_no_cc$gRNA_iBAR))]
+df_gRNA_iBAR <- data.frame(gRNA=merged_sce_single_gRNA_iBAR_no_cc$gRNA,iBAR=merged_sce_single_gRNA_iBAR_no_cc$iBAR)
+df_gRNA_iBAR_count <- df_gRNA_iBAR %>% group_by_all() %>% dplyr::count()
+df_gRNA_iBAR_count <- df_gRNA_iBAR_count[df_gRNA_iBAR_count$n>1,]
+```
+
+The following plot illustrates the distribution of cell numbers for unique gRNA-iBAR combinations. 
+
+```{r unique_gRNA_iBAR combinations}
+ggplot(mapping=aes(x=log2(df_gRNA_iBAR_count$n)))+geom_histogram()+ggtitle("Number of cells across gRNA-iBAR combinations")+ ylab("number of iBAR-gRNA combinations")+ xlab("log2 of number of cells") +theme_classic(base_size=16)
+
+```
+
+# Puro-barcode calling
+
+The first step is to load the cellranger data.
+
+```{r, eval=FALSE}
+puro_matrix <- c()
+for (j in 1:2){
+ raw_matrix <- readMM(paste0(puroBC_raw_matrices_cellranger_folders[j],"/raw_feature_bc_matrix/matrix.mtx.gz"))
+  features <- read.delim(paste0(puroBC_raw_matrices_cellranger_folders[j],"/features.tsv.gz"),header=F,stringsAsFactors = F)
+  barcodes <- read.delim(paste0(puroBC_raw_matrices_cellranger_folders[j],"/barcodes.tsv.gz"),header=F,stringsAsFactors = F)
+  rownames(raw_matrix) <- features[,1]
+  colnames(raw_matrix) <- paste0(substring(barcodes[,1],1,16),"-",j)
+  puro_matrix <- cbind(puro_matrix,raw_matrix[grepl("puro",rownames(raw_matrix)),colnames(raw_matrix)%in%colnames(merged_sce_single_gRNA_iBAR_no_cc)])
+}
+puro_matrix <- puro_matrix[rowSums(puro_matrix) > 2,]
+```
+
+Now puro-barcodes are assigned to cells using mixtures of skewed normal distributions. 
+
+```{r, eval =FALSE}
+puro_assignment <- barcode_calling(puro_matrix,"puro-barcode scRNA-seq data with MissionBio",barcode_name="puro")
+
+saveRDS(puro_assignment,file=puroBC_assignment_save_file)
+```
+
+```{r}
+puro_assignment <- readRDS(puroBC_assignment_save_file)
+merged_sce_single_gRNA_iBAR_no_cc$puro <- NA
+merged_sce_single_gRNA_iBAR_no_cc$puro[match(names(puro_assignment$barcode_assignment$barcode_assignment),colnames(merged_sce_single_gRNA_iBAR_no_cc))] <- puro_assignment$barcode_assignment$barcode_assignment
+```
+
+#Comparing iBAR and puro barcodes 
+
+```{r}
+df_puro_iBAR <- data.frame(puroBC=merged_sce_single_gRNA_iBAR_no_cc$puro,gRNA_iBAR=merged_sce_single_gRNA_iBAR_no_cc$gRNA_iBAR)
+df_puro_iBAR_count <- df_puro_iBAR %>% group_by_all() %>% count()
+```
+
+We remove the iBARs-puro combinations with only one cell and a frequency of less than 2/3 of cells with the iBAR. 
+
+```{r}
+df_puro_iBAR_count <- df_puro_iBAR_count[df_puro_iBAR_count$n>1,]
+df_puro_iBAR_count <- df_puro_iBAR_count[!(is.na(df_puro_iBAR_count$puroBC)),]
+df_puro_iBAR_count$freq <- NA
+for (j in 1:length(unique(df_puro_iBAR_count$gRNA_iBAR))){
+  xx <- df_puro_iBAR_count$gRNA_iBAR == unique(df_puro_iBAR_count$gRNA_iBAR)[j]
+  temp <- df_puro_iBAR_count[xx,]
+  temp$freq <- temp$n/sum(temp$n)
+  df_puro_iBAR_count[xx,] <- temp
+}
+df_puro_iBAR_count <- df_puro_iBAR_count[df_puro_iBAR_count$freq>0.25,]
+head(df_puro_iBAR_count)
+```
+
+To remove spurious assignments, we remove puro-barcodes that often occur as second puro-barcode in a cell
+
+```{r}
+several_puro_BC <- df_puro_iBAR_count$puroBC[grepl("-",df_puro_iBAR_count$puroBC)]
+several_puro_BC <- sapply(several_puro_BC,function(x) strsplit(x,"-"))
+puro_remove <- names(table(unlist(several_puro_BC)))[table(unlist(several_puro_BC))>2 ]
+several_puro_BC <- lapply(several_puro_BC,function(x) x[!(x%in% puro_remove)])
+several_puro_BC <- lapply(several_puro_BC,function(x) {if(length(x)==1) {return(x)} else{v=x[1]; for (k in 2:length(x)){v <- paste0(v,"-",x[k])}; return(v)}})
+df_puro_iBAR_count$puroBC[grepl("-",df_puro_iBAR_count$puroBC)] <- unlist(several_puro_BC)
+head(df_puro_iBAR_count)
+```
+
+Now we remove the remaining puroBC, gRNA_iBAR combination with more than one puroBC 
+
+```{r}
+df_puro_iBAR_count <- df_puro_iBAR_count[!(grepl("-",df_puro_iBAR_count$puroBC)),]
+```
+
+We merge the puro-iBAR combinations that have now several lines in the data frame (after removing the spurious puro-barcodes)
+
+```{r}
+df_puro_iBAR_count_filtered <- c()
+puroBC_gRNA_iBAR <- paste0(df_puro_iBAR_count$puroBC,"-",df_puro_iBAR_count$gRNA_iBAR)
+for (j in 1:length(unique(puroBC_gRNA_iBAR))){
+  temp <- df_puro_iBAR_count[puroBC_gRNA_iBAR==unique(puroBC_gRNA_iBAR)[j],,drop=FALSE]
+  df_puro_iBAR_count_filtered  <- rbind(df_puro_iBAR_count_filtered ,c(temp$puroBC[1],temp$gRNA_iBAR[1],sum(temp$n),sum(temp$freq)))
+}
+colnames(df_puro_iBAR_count_filtered) <- c("puroBC","gRNA_iBAR","n","freq")
+df_puro_iBAR_count_filtered <- as.data.frame(df_puro_iBAR_count_filtered)
+df_puro_iBAR_count_filtered$n <- as.double(df_puro_iBAR_count_filtered$n)
+df_puro_iBAR_count_filtered$freq <- as.double(df_puro_iBAR_count_filtered$freq)
+```
+
+Now we remove all remaining puro-iBAR combinations with a frequency of less than 2/3 of the cell with the respective iBAR
+
+```{r}
+df_puro_iBAR_count_filtered <- df_puro_iBAR_count_filtered[df_puro_iBAR_count_filtered$freq>=2/3,]
+```
+
+The puro barcode of the SingleCellExperiment object is now set to NA unless the puro-barcode assigned to the respective cells is among the filtered puro-barcodes. 
+
+```{r}
+merged_sce_single_gRNA_iBAR_no_cc$puro[!(merged_sce_single_gRNA_iBAR_no_cc$puro%in%df_puro_iBAR_count_filtered$puroBC)] <- NA
+```
+
+Finally, we save the SingleCellExperiment object. 
+
+```{r}
+saveRDS(merged_sce_single_gRNA_iBAR_no_cc,file=sce_save_file)
+```
