@@ -1,6 +1,7 @@
 # This script counts barcode occurences from sequences, using read groups and 
 # sequences extracted from reads mapped to the gRNA and iBAR amplicons by
-# the MissionBio tapestri pipeline
+# the Mission Bio Tapestri pipeline
+# The input files paste0("tapestri_",sample_name,".sequences.txt") were obtained as follows: first, the output file ...cells.bam from the tapestri pipeline was deduplicated. Then, columns 10, 14 and 15 of that file were printed and save as paste0("tapestri_",sample_name,".sequences.txt")
 
 sample_name=commandArgs(trailingOnly=TRUE)
 sequence_length<- 151

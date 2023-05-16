@@ -6,12 +6,12 @@ output:
     toc: yes  
 ---
 
-This notebook adds to the barcode meta-data whether the gRNA was covered by one of the MissionBio amplicons, and the name of the amplicon. 
+This notebook adds to the barcode meta-data whether the gRNA was covered by one of the Mission Bio amplicons, and the name of the amplicon. 
 It needs to be run after GT_per_barcode.Rmd and before analyse_scRNAseq_with_genotype_figures.Rmd. 
 
 ```{r}
 GT_info <- readRDS("GT_barcode_metadata.rds")
-amplicons <- read.table("amplicons.txt")
+amplicons <- read.table("amplicons.txt")# amplicon ranges are in JAK1_amplicons_hg38/CO259_sanger_031021_hg38.bed on Zenodo
 assign_amplicon <- function(start_gRNA,end_gRNA,strand){
   if (strand=="+"){
     start_window <- as.double(start_gRNA)+3

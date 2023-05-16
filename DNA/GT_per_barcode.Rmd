@@ -6,7 +6,7 @@ output:
     keep_md: yes
 ---
 
-This script processes per-cell genotype calls using iBAR and puro-barcode information. The output is summarised genotype information per barcode. Further, consequence and impact of genotypes are predicted using VEP (W. McLaren et al. The ensembl variant effect predictor. Genome Biol., 17 (2016)) and actual genotype information. 
+This script processes per-cell genotype calls using iBAR and puroR-barcode information. The output is summarised genotype information per barcode. Further, consequence and impact of genotypes are predicted using VEP (W. McLaren et al. The ensembl variant effect predictor. Genome Biol., 17 (2016)) and actual genotype information. 
 
 ```{r,setup}
 knitr::opts_chunk$set(
