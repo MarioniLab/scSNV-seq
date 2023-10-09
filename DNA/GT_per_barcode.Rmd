@@ -6,7 +6,7 @@ output:
     keep_md: yes
 ---
 
-This script processes per-cell genotype calls using iBAR and puroR-barcode information. The output is summarised genotype information per barcode. Further, consequence and impact of genotypes are predicted using VEP (W. McLaren et al. The ensembl variant effect predictor. Genome Biol., 17 (2016)) and actual genotype information. 
+This script processes per-cell genotype calls using iBAR and puro-barcode information. The output is summarised genotype information per barcode. Further, consequence and impact of genotypes are predicted using VEP (W. McLaren et al. The ensembl variant effect predictor. Genome Biol., 17 (2016)) and actual genotype information. 
 
 ```{r,setup}
 knitr::opts_chunk$set(
@@ -19,16 +19,27 @@ knitr::opts_chunk$set(
 )
 source("core_functions_MissionBio.R")
 library(dplyr)
+library(stringr)
 ```
 
 Reading in the per-cell genotype information. 
 
 ```{r}
 df_GT <- readRDS("genotypes_MB_per_cell.rds")
+```
+
+
+```{r}
 puroBC.keep <- names(table(df_GT$puroBC_gRNA_iBAR))[table(df_GT$puroBC_gRNA_iBAR)>= 3]
 df_GT_min_cells <- df_GT[df_GT$puroBC_gRNA_iBAR%in%puroBC.keep,]
 df_GT_min_cells <- df_GT_min_cells[!(grepl("NA",df_GT_min_cells$puroBC_gRNA_iBAR)),]
 dim(df_GT_min_cells)
+```
+
+How many barcode groups have more than 3 cells?
+
+```{r}
+length(unique(df_GT_min_cells$puroBC_gRNA_iBAR))
 ```
 
 Checking if any puro-barcodes are associated with more than one gRNA-iBAR combination. 
@@ -37,6 +48,14 @@ Checking if any puro-barcodes are associated with more than one gRNA-iBAR combin
 count_puroBC_iBAR <- df_GT_min_cells[,3:4] %>% dplyr::group_by_all() %>% dplyr::count()
 puroBC_dup <- names(table(count_puroBC_iBAR$puroBC))[table(count_puroBC_iBAR$puroBC) > 1]
 df_GT_min_cells <- df_GT_min_cells[!(df_GT_min_cells$puroBC%in%puroBC_dup),]
+```
+
+For the 9908 cells that are part of a barcode group of at least 3 cells, we compute for each cell the number of called 0/0/1 mutations. 
+
+```{r one_allele_in_droplet}
+nr_mut_one_allele <- as.double(unlist(lapply(df_GT_min_cells$GT, function(x) str_count(x,"0/0/1"))))
+ggplot(mapping=aes(x=nr_mut_one_allele)) + geom_density(bw=0.75,size=2)+theme_classic(base_size=24)+
+  xlab("nr. 0/0/1 called in cell")
 ```
 
 Now we assign mutations to puro-barcodes.
@@ -90,6 +109,29 @@ The number of puro-barcodes after this filtering is the following:
 ```{r}
 length(unique(df_GT_puro_iBAR$puroBC))
 ```
+
+We show that using at least 3 cells prevents allele dropout and noise 0/0/1 calls.
+
+First, we plot the number of 0/0/1 edits called per barcode.
+
+```{r one_allele_mutation_in_barcode_group}
+nr_mut_one_allele_per_barcode_group <- as.double(unlist(lapply(df_GT_puro_iBAR$GT, function(x) str_count(x,"0/0/1"))))
+ggplot(mapping=aes(x=nr_mut_one_allele_per_barcode_group)) + geom_density(bw=0.75,size=2)+theme_classic(base_size=24)+
+  xlab("nr. 0/0/1 called for barcode group")
+```
+We combine the graph if distribution of 0/0/1 calls we would get if obtaining the genotype for each cell instead of cell barcode. 
+
+```{r one_allele_mutation_comp}
+df <- data.frame(nr_mut_one_allele=c(nr_mut_one_allele,nr_mut_one_allele_per_barcode_group),
+              calling=c(rep("per cell",length(nr_mut_one_allele)),
+                        rep("per barcode group",length(nr_mut_one_allele_per_barcode_group))))
+ggplot(df,mapping=aes(x=nr_mut_one_allele,color=calling)) + geom_density(bw=0.75,size=2)+theme_classic(base_size=24)+
+  xlab("nr. 0/0/1 C->T called")+theme(legend.position = "bottom") + scale_color_manual(values=c("per cell"="orange","per barcode group"="purple"))
+```
+
+Now we look at allele dropout. 
+
+
 
 The mutations are converted to an input format for VEP (W. McLaren et al. The ensembl variant effect predictor. Genome Biol., 17 (2016)). 
 
@@ -284,7 +326,7 @@ df_GT_puro_iBAR$SIFT[grepl("-",df_GT_puro_iBAR$SIFT)] <- NA
 Adding scores from a FACS-based screen from Coelho et al.(2023).
 
 ```{r}
-original_gRNAs_info <- read.table("mutation_file_Coelho_2023.csv",sep=",",header=TRUE)#publicly available meta data from Coelho et al. (2023). Cell.
+original_gRNAs_info <- read.table("mutation_file_Coelho_2023.csv",sep=",",header=TRUE)
 original_gRNAs_info <- original_gRNAs_info[grepl("BE3-NGG",original_gRNAs_info$editor),]
 original_gRNAs_info_JAK1 <- original_gRNAs_info[grepl("JAK1",original_gRNAs_info$editor),]
 intersected_gRNA <- intersect(original_gRNAs_info$sgRNA_ID,df_GT_puro_iBAR$gRNA)
@@ -318,7 +360,7 @@ saveRDS(df_GT_puro_iBAR,file= "GT_barcode_metadata.rds")
 Computing edit points
 
 
-```{r}
+```{r plot_edits_details}
 compute_editing_position <- function(start,strand,GT){
   if (nchar(GT) >0 ){
     temp_GT <- strsplit(GT,";")[[1]]
@@ -413,3 +455,16 @@ saveRDS(df_GT_puro_iBAR,file= "GT_barcode_metadata.rds")
 write.table(df_GT_puro_iBAR,"GT_barcode_metadata.csv",sep=",",col.names=TRUE,row.names=FALSE,quote=FALSE)
 ```
 
+Below we compute the proportion of edits for each number of alleles.
+
+```{r number_alleles}
+nr_mut_one_allele_per_barcode_group <- as.double(unlist(lapply(df_GT_puro_iBAR$GT, function(x) str_count(x,"0/0/1"))))
+nr_mut_two_alleles_per_barcode_group <- as.double(unlist(lapply(df_GT_puro_iBAR$GT, function(x) str_count(x,"0/1/1"))))
+nr_mut_three_alleles_per_barcode_group <- as.double(unlist(lapply(df_GT_puro_iBAR$GT, function(x) str_count(x,"1/1/1"))))
+df <- data.frame(nr_mut=c(nr_mut_one_allele_per_barcode_group,nr_mut_two_alleles_per_barcode_group,nr_mut_three_alleles_per_barcode_group),
+              calling=c(rep("0/0/1",length(nr_mut_one_allele_per_barcode_group)),
+                        rep("0/1/1",length(nr_mut_one_allele_per_barcode_group)),
+                        rep("1/1/1",length(nr_mut_one_allele_per_barcode_group))))
+ggplot(df,mapping=aes(x=nr_mut,color=calling)) + geom_density(bw=0.75,size=2)+theme_classic(base_size=24)+
+  xlab("")+theme(legend.position = "bottom") + scale_color_manual(values=c("0/0/1"= "darkblue","0/1/1"="purple","1/1/1"="darkred"))
+```

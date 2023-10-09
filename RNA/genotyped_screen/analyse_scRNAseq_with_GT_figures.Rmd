@@ -238,6 +238,31 @@ print(plotReducedDim(sce_temp,colour_by = "consequence",dimred="UMAP") +
 }
 
 ```
+We replot the UMAPs on a barcode-group basis, averaging the UMAP coordinates across all cells with the same barcode. 
+
+
+```{r umap_consequence_per_barcode}
+umap_barcode <- matrix(nrow=2,ncol=length(unique(sce_knownGT$gRNA_iBAR)))
+colnames(umap_barcode) <- unique(sce_knownGT$gRNA_iBAR)
+for (k in 1:length(unique(sce_knownGT$gRNA_iBAR))){
+  umap_barcode[,k] <- t(colMeans(reducedDims(sce_knownGT[,sce_knownGT$gRNA_iBAR==unique(sce_knownGT$gRNA_iBAR)[k]])$UMAP))
+}
+consequence_barcode <- rep("",ncol(umap_barcode))
+for (k in 1:length(consequence_barcode)){
+  consequence_barcode[k] <- unique(sce_knownGT$consequence[sce_knownGT$gRNA_iBAR==unique(sce_knownGT$gRNA_iBAR)[k]])
+}
+df <- data.frame(umap_1 <- umap_barcode[1,],umap_2=umap_barcode[2,],consequence=consequence_barcode)
+colnames(df) <- c("umap_1","umap_2","consequence")
+for (j in 1:length(unique(sce_knownGT$consequence))){
+  df_temp <- rbind(df[df$consequence!=unique(sce_knownGT$consequence)[j],],
+df[df$consequence==unique(sce_knownGT$consequence)[j],])
+  df_temp$consequence[df_temp$consequence!=unique(sce_knownGT$consequence)[j]] <- NA
+  print(ggplot(df_temp,aes(color =consequence,x=umap_1,y=umap_2)) + geom_point(size=5)+
+  scale_color_manual(values=colours_consequence,na.value="lightgrey")+
+  labs(color="consequence")  + theme_classic(base_size=16)+ theme(legend.position = "bottom")+guides(color=guide_legend(nrow=2)))
+}
+
+```
 
 # Distribution of barcodes across clusters 
 
