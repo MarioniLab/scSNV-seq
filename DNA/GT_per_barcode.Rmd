@@ -409,7 +409,6 @@ ggplot(editing_matrix_melt,aes(x=barcode,y=position,fill=zygosity)) + geom_tile(
         axis.text.x=element_blank(),
         axis.ticks.x=element_blank()) 
 
-df_GT_puro_iBAR
 ```
 
 
@@ -468,3 +467,8 @@ df <- data.frame(nr_mut=c(nr_mut_one_allele_per_barcode_group,nr_mut_two_alleles
 ggplot(df,mapping=aes(x=nr_mut,color=calling)) + geom_density(bw=0.75,size=2)+theme_classic(base_size=24)+
   xlab("")+theme(legend.position = "bottom") + scale_color_manual(values=c("0/0/1"= "darkblue","0/1/1"="purple","1/1/1"="darkred"))
 ```
+Total number of 0/0/1 C->T edits: `r sum(nr_mut_one_allele_per_barcode_group)`. 
+Total number of 0/1/1 C->T edits: `r sum(nr_mut_two_alleles_per_barcode_group)`. 
+Total number of 1/1/1 C->T edits: `r sum(nr_mut_three_alleles_per_barcode_group)`.
+
+Total number of cells with at least one heterozygous edit: `r sum(nr_mut_two_alleles_per_barcode_group>0 | nr_mut_one_allele_per_barcode_group>0) )`

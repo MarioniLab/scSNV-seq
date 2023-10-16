@@ -9,6 +9,8 @@ output:
 ---
 
 This script summaries our results on barcode level and compares predicted and actual editing. 
+It is important to run add_amplicons_to_metadata.Rmd before this script, to add amplicon coverage information 
+to the genotype meta data file. 
 
 ```{r}
 library(ggplot2)
@@ -105,7 +107,17 @@ For all JAK1 targeting barcodes covered by the amplicons
           axis.ticks = element_blank())+labs(x = NULL, y = NULL, fill = NULL))
 
 ```
+## Overall comparison of outcomes for barcodes with edits with different functional consequence to predicted edit
 
+We look at those barcode groups that were not predicted to have a WT outcome. 
+
+```{r}
+GT_info_pred_wrong_not_WT <- GT_info_sc_and_pool[GT_info_sc_and_pool$worst_consequence!=GT_info_sc_and_pool$predicted_consequence & GT_info_sc_and_pool$predicted_consequence!="WT",c("worst_consequence","predicted_consequence")]
+GT_info_pred_wrong_not_WT_count <- GT_info_pred_wrong_not_WT %>% dplyr::group_by_all() %>% dplyr::count()
+ggplot(GT_info_pred_wrong_not_WT_count,aes(x=worst_consequence,y=predicted_consequence,fill=n))+geom_raster()+ scale_fill_continuous_tableau(na.value="white",palette="Red-Gold")+
+      theme_classic(base_size=16)
+```
+Out of those barcode groups with a predicted non-WT edit, a total of `r  sum(GT_info_pred_wrong_not_WT$worst_consequence=="het")` (`r  round(100*sum(GT_info_pred_wrong_not_WT$worst_consequence=="het")/nrow(GT_info_pred_wrong_not_WT),1)`%) had only heterozygous edits, and `r sum(GT_info_pred_wrong_not_WT$worst_consequence=="WT")` (`r  round(100*sum(GT_info_pred_wrong_not_WT$worst_consequence=="WT")/nrow(GT_info_pred_wrong_not_WT),1)`)% were WT. 
 
 # Checking false negatives and false positives 
 
